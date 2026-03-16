@@ -10,7 +10,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
-- **35 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **37 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -98,14 +98,14 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (35 total)
+- **View all available tools** (37 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
 
 ## Available Tools
 
-GhidrAssistMCP provides 35 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 37 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -231,6 +231,33 @@ Rename multiple symbols in one operation.
 | `list` | List all bookmarks |
 | `set` | Set a new bookmark |
 | `remove` | Remove a bookmark |
+
+#### `enum` - Enum Data Type Tool
+
+| Action | Description |
+| ------ | ----------- |
+| `list` | List all enum data types (optional `pattern` filter) |
+| `get_info` | Get details of an enum including all named values |
+| `create` | Create a new enum with optional `size` (1/2/4/8 bytes) and initial `values` (`"NAME=VALUE,..."`) |
+| `add_value` | Add a named value (`value_name`, `value`) to an existing enum |
+| `remove_value` | Remove a named value from an existing enum |
+| `rename_value` | Rename a value within an enum (`value_name` → `new_name`) |
+| `rename` | Rename the enum data type itself |
+| `delete` | Delete an enum data type |
+
+Use `category` (e.g. `/MyTypes`) to scope lookups or set the destination for `create`.
+
+#### `equate` - Equate Tool
+
+Equates associate symbolic names with constant integer values used in disassembly.
+
+| Action | Description |
+| ------ | ----------- |
+| `list` | List all equates (optional `pattern` filter) |
+| `get_info` | Get details of a specific equate |
+| `create` | Create an equate with a `name` and numeric `value` |
+| `rename` | Rename an equate (`name` → `new_name`) |
+| `delete` | Delete an equate |
 
 ### Search Tools
 

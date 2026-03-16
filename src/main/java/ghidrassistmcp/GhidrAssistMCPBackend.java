@@ -34,6 +34,8 @@ import ghidrassistmcp.tools.CancelTaskTool;
 import ghidrassistmcp.tools.ClassTool;
 import ghidrassistmcp.tools.CommentsTool;
 import ghidrassistmcp.tools.CreateDataVarTool;
+import ghidrassistmcp.tools.EnumTool;
+import ghidrassistmcp.tools.EquateTool;
 import ghidrassistmcp.tools.GetBasicBlocksTool;
 import ghidrassistmcp.tools.GetCodeTool;
 import ghidrassistmcp.tools.GetCurrentAddressTool;
@@ -143,6 +145,10 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new GetTaskStatusTool());
         registerTool(new CancelTaskTool());
         registerTool(new ListTasksTool());
+
+        // Register enum and equate tools
+        registerTool(new EnumTool());
+        registerTool(new EquateTool());
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }
