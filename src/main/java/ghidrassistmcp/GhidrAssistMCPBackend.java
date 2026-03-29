@@ -40,6 +40,7 @@ import ghidrassistmcp.tools.GetCurrentAddressTool;
 import ghidrassistmcp.tools.GetCurrentFunctionTool;
 import ghidrassistmcp.tools.GetEntryPointsTool;
 import ghidrassistmcp.tools.GetFunctionInfoTool;
+import ghidrassistmcp.tools.GetFunctionSignatureTool;
 import ghidrassistmcp.tools.GetFunctionStackLayoutTool;
 import ghidrassistmcp.tools.GetFunctionStatisticsTool;
 import ghidrassistmcp.tools.GetHexdumpTool;
@@ -102,6 +103,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new ListProgramsTool());        // list_binaries
         registerTool(new ListFunctionsTool());       // get_functions
         registerTool(new GetFunctionInfoTool());     // analyze_function
+        registerTool(new GetFunctionSignatureTool());
         registerTool(new ListSegmentsTool());        // get_segments
         registerTool(new ListImportsTool());         // get_imports
         registerTool(new ListExportsTool());         // get_exports
