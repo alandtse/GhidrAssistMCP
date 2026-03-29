@@ -25,6 +25,7 @@ import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
@@ -398,15 +399,10 @@ final class RenameSymbolCore {
      * Note: Symbol operations must run on the Swing EDT to avoid race conditions with
      * Ghidra's Symbol Tree UI updates.
      */
-    private static RenameResult renameData(Program program, String addressStr, String newName) {
-        Address address;
-        try {
-            address = program.getAddressFactory().getAddress(addressStr);
-            if (address == null) {
-                return new RenameResult(false, "Invalid address: " + addressStr);
-            }
-        } catch (Exception e) {
-            return new RenameResult(false, "Invalid address format: " + addressStr);
+    private static RenameResult renameData(Program program, String identifier, String newName) {
+        Address address = resolveDataAddress(program, identifier);
+        if (address == null) {
+            return new RenameResult(false, "Could not resolve data/global symbol: " + identifier);
         }
 
         AtomicReference<RenameResult> resultRef = new AtomicReference<>();
@@ -425,7 +421,7 @@ final class RenameSymbolCore {
                                 primarySymbol.setName(newName, SourceType.USER_DEFINED);
                                 program.endTransaction(transactionID, true);
                                 resultRef.set(new RenameResult(true,
-                                    "Successfully renamed data at " + addressStr +
+                                    "Successfully renamed data at " + identifier +
                                         " from '" + oldName + "' to '" + newName + "'"));
                                 return;
                             } catch (DuplicateNameException e) {
@@ -443,7 +439,7 @@ final class RenameSymbolCore {
                         program.getSymbolTable().createLabel(targetAddress, newName, SourceType.USER_DEFINED);
                         program.endTransaction(transactionID, true);
                         resultRef.set(new RenameResult(true,
-                            "Successfully created label '" + newName + "' at " + addressStr));
+                            "Successfully created label '" + newName + "' at " + identifier));
                         return;
                     }
 
@@ -455,7 +451,7 @@ final class RenameSymbolCore {
                             symbol.setName(newName, SourceType.USER_DEFINED);
                             program.endTransaction(transactionID, true);
                             resultRef.set(new RenameResult(true,
-                                "Successfully renamed symbol at " + addressStr +
+                                "Successfully renamed symbol at " + identifier +
                                     " from '" + oldName + "' to '" + newName + "'"));
                             return;
                         } catch (DuplicateNameException e) {
@@ -473,7 +469,7 @@ final class RenameSymbolCore {
                     program.getSymbolTable().createLabel(targetAddress, newName, SourceType.USER_DEFINED);
                     program.endTransaction(transactionID, true);
                     resultRef.set(new RenameResult(true,
-                        "Successfully created label '" + newName + "' at " + addressStr));
+                        "Successfully created label '" + newName + "' at " + identifier));
                 } catch (Exception e) {
                     program.endTransaction(transactionID, false);
                     resultRef.set(new RenameResult(false, "Error creating label: " + e.getMessage()));
@@ -484,6 +480,32 @@ final class RenameSymbolCore {
         }
 
         return resultRef.get() != null ? resultRef.get() : new RenameResult(false, "Unknown error renaming data");
+    }
+
+    private static Address resolveDataAddress(Program program, String identifier) {
+        try {
+            Address address = program.getAddressFactory().getAddress(identifier);
+            if (address != null && program.getFunctionManager().getFunctionAt(address) == null) {
+                return address;
+            }
+        } catch (Exception e) {
+            // Fall through to symbol lookup
+        }
+
+        SymbolIterator symbols = program.getSymbolTable().getSymbolIterator();
+        while (symbols.hasNext()) {
+            Symbol symbol = symbols.next();
+            if (!symbol.getName().equals(identifier)) {
+                continue;
+            }
+
+            Address address = symbol.getAddress();
+            if (address != null && program.getFunctionManager().getFunctionAt(address) == null) {
+                return address;
+            }
+        }
+
+        return null;
     }
 
     /**

@@ -211,7 +211,7 @@ Rename multiple symbols in one operation.
 | Action | Description |
 | ------ | ----------- |
 | `list` | List local variables for a function |
-| `rename` | Rename a local variable |
+| `rename` | Rename a local variable or a global/data symbol using `scope` |
 | `set_type` | Set data type for a local variable |
 | `set_prototype` | Set function signature/prototype |
 
@@ -537,7 +537,7 @@ GhidrAssistMCP/
 - `struct`: `action: create|modify|merge|set_field|name_gap|auto_create|rename_field|field_xrefs`
 - `rename_symbol`: `target_type: function|data|variable`
 - `comments`: `action: get|set|list|remove`
-- `variables`: `action: list|rename|set_type|set_prototype`
+- `variables`: `action: list|rename|set_type|set_prototype` with `scope: auto|local|global` for rename
 - `types`: `action: list|get_info|set|delete`
 - `bookmarks`: `action: list|set|remove`
 - `xrefs`: `address|function` with `include_calls` parameter

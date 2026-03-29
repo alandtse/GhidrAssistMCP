@@ -4,6 +4,7 @@
  */
 package ghidrassistmcp.tools;
 
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +47,7 @@ public class VariablesTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Variable operations: list, rename, retype local variables, or set_prototype for function signatures";
+        return "Variable operations: list, rename local/global variables, retype local variables, or set_prototype for function signatures";
     }
 
     @Override
@@ -62,13 +63,30 @@ public class VariablesTool implements McpTool {
                     "type", "string",
                     "description", "Function name (required for list/rename/retype)"
                 )),
+                Map.entry("function_name_or_address", Map.of(
+                    "type", "string",
+                    "description", "Function name or address alias for local rename operations"
+                )),
                 Map.entry("variable_name", Map.of(
                     "type", "string",
                     "description", "Variable name (required for rename/retype)"
                 )),
+                Map.entry("var_name", Map.of(
+                    "type", "string",
+                    "description", "Alias for variable_name; for global rename this may be the current symbol name"
+                )),
                 Map.entry("new_name", Map.of(
                     "type", "string",
                     "description", "New name (required for rename)"
+                )),
+                Map.entry("scope", Map.of(
+                    "type", "string",
+                    "description", "Rename scope for action='rename': auto, local, or global",
+                    "enum", List.of("auto", "local", "global")
+                )),
+                Map.entry("address_or_name", Map.of(
+                    "type", "string",
+                    "description", "Global/data symbol address or current name for scope='global'"
                 )),
                 Map.entry("data_type", Map.of(
                     "type", "string",
@@ -164,11 +182,43 @@ public class VariablesTool implements McpTool {
     }
 
     private McpSchema.CallToolResult executeRename(Map<String, Object> arguments, Program program) {
-        String functionName = (String) arguments.get("function_name");
-        String variableName = (String) arguments.get("variable_name");
+        String functionName = coalesce(arguments, "function_name_or_address", "function_name");
+        String variableName = coalesce(arguments, "var_name", "variable_name");
         String newName = (String) arguments.get("new_name");
-        if (functionName == null || variableName == null || newName == null) {
-            return result("function_name, variable_name, and new_name are required for rename");
+        String scope = coalesce(arguments, "scope");
+        String addressOrName = coalesce(arguments, "address_or_name");
+
+        if (newName == null) {
+            return result("new_name is required for rename");
+        }
+
+        String normalizedScope = scope == null ? "auto" : scope.toLowerCase();
+        if (!normalizedScope.equals("auto") && !normalizedScope.equals("local") && !normalizedScope.equals("global")) {
+            return result("scope must be 'auto', 'local', or 'global'");
+        }
+
+        boolean localRequested =
+            normalizedScope.equals("local") ||
+            (normalizedScope.equals("auto") &&
+                functionName != null && !functionName.isEmpty() &&
+                variableName != null && !variableName.isEmpty() &&
+                (addressOrName == null || addressOrName.isEmpty()));
+
+        if (!localRequested) {
+            String globalTarget = addressOrName != null ? addressOrName : variableName;
+            if (globalTarget == null || globalTarget.isEmpty()) {
+                return result("address_or_name or var_name/variable_name is required for global rename");
+            }
+
+            Map<String, Object> renameArgs = new HashMap<>();
+            renameArgs.put("target_type", "data");
+            renameArgs.put("identifier", globalTarget);
+            renameArgs.put("new_name", newName);
+            return result(RenameSymbolCore.renameOne(renameArgs, program).message);
+        }
+
+        if (functionName == null || variableName == null) {
+            return result("function_name_or_address and var_name/variable_name are required for local rename");
         }
 
         Function function = findFunction(program, functionName);
@@ -311,6 +361,16 @@ public class VariablesTool implements McpTool {
 
         for (Function f : program.getFunctionManager().getFunctions(true)) {
             if (f.getName().equals(name)) return f;
+        }
+        return null;
+    }
+
+    private static String coalesce(Map<String, Object> arguments, String... keys) {
+        for (String key : keys) {
+            Object value = arguments.get(key);
+            if (value instanceof String str && !str.isEmpty()) {
+                return str;
+            }
         }
         return null;
     }
