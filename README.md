@@ -9,6 +9,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 ### Key Features
 
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
+- **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
 - **37 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
@@ -186,6 +187,9 @@ These tools bundle related operations behind a discriminator parameter (e.g., `a
 | `auto_create` | Automatically create structure from variable usage patterns |
 | `rename_field` | Rename a field within a structure |
 | `field_xrefs` | Find cross-references to a specific struct field |
+| `search_comments` | Search struct field comments (and optionally names) for a pattern; defaults to `-BAD-` (Ghidra's marker for deleted members) |
+| `find_enum_use` | Find all struct fields whose resolved base type is a given enum (unwraps pointers, arrays, and typedefs) |
+| `replace_type` | Replace all uses of one struct type with another across the entire program (variables, fields, typedefs) |
 
 #### `rename_symbol` - Symbol Renaming Tool
 
@@ -258,6 +262,12 @@ Equates associate symbolic names with constant integer values used in disassembl
 | `create` | Create an equate with a `name` and numeric `value` |
 | `rename` | Rename an equate (`name` → `new_name`) |
 | `delete` | Delete an equate |
+
+#### `eval_python` - PyGhidra Evaluator Tool
+
+| Parameter | Description |
+| --------- | ----------- |
+| `script`  | Execute arbitrary Python 3 code in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or it falls back to Jython 2.7). The global variables `currentProgram`, `currentAddress`, and `monitor` are automatically accessible in your scripts. |
 
 ### Search Tools
 

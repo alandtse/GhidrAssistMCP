@@ -133,7 +133,7 @@ public class StructTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Structure operations: create, modify, merge, set_field, name_gap, auto_create, rename_field, or field_xrefs";
+        return "Structure operations: create, modify, merge, set_field, name_gap, auto_create, rename_field, field_xrefs, search_comments, find_enum_use, or replace_type";
     }
 
     @Override
@@ -145,7 +145,7 @@ public class StructTool implements McpTool {
                 Map.entry("action", Map.of(
                     "type", "string",
                     "description", "Structure operation to perform",
-                    "enum", List.of("create", "modify", "merge", "set_field", "name_gap", "auto_create", "rename_field", "field_xrefs")
+                    "enum", List.of("create", "modify", "merge", "set_field", "name_gap", "auto_create", "rename_field", "field_xrefs", "search_comments", "find_enum_use", "replace_type")
                 )),
 
                 // create
@@ -284,6 +284,29 @@ public class StructTool implements McpTool {
                     "description", "For action='field_xrefs': maximum number of references to return (default 100)",
                     "default", 100,
                     "minimum", 1
+                )),
+
+                // search_comments / find_enum_use
+                Map.entry("pattern", Map.of(
+                    "type", "string",
+                    "description", "For action='search_comments': text to search for in field comments (default: \"-BAD-\"). " +
+                        "For action='find_enum_use': optional substring filter applied to struct names (case-insensitive)."
+                )),
+                Map.entry("search_names", Map.of(
+                    "type", "boolean",
+                    "description", "For action='search_comments': if true, also search field names for the pattern in addition to comments. Default false.",
+                    "default", false
+                )),
+                Map.entry("enum_name", Map.of(
+                    "type", "string",
+                    "description", "For action='find_enum_use': name of the enum data type to find uses of in struct fields (required)."
+                )),
+
+                // replace_type
+                Map.entry("replacement_name", Map.of(
+                    "type", "string",
+                    "description", "For action='replace_type': name of the structure to replace the source structure with. " +
+                        "All uses of 'structure_name' (variables, fields, typedefs) will be updated to this type."
                 ))
             ),
             List.of("action"), null, null, null);
@@ -328,9 +351,15 @@ public class StructTool implements McpTool {
                 return executeRenameField(arguments, currentProgram);
             case "field_xrefs":
                 return executeFieldXrefs(arguments, currentProgram);
+            case "search_comments":
+                return executeSearchComments(arguments, currentProgram);
+            case "find_enum_use":
+                return executeFindEnumUse(arguments, currentProgram);
+            case "replace_type":
+                return executeReplaceType(arguments, currentProgram);
             default:
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Invalid action. Use 'create', 'modify', 'merge', 'set_field', 'name_gap', 'auto_create', 'rename_field', or 'field_xrefs'")
+                    .addTextContent("Invalid action. Use 'create', 'modify', 'merge', 'set_field', 'name_gap', 'auto_create', 'rename_field', 'field_xrefs', 'search_comments', 'find_enum_use', or 'replace_type'")
                     .build();
         }
     }
@@ -1947,5 +1976,275 @@ public class StructTool implements McpTool {
             return "CALL";
         }
         return "UNKNOWN";
+    }
+
+    // ========== SEARCH_COMMENTS ACTION ==========
+
+    /**
+     * Search struct field comments (and optionally field names) for a text pattern.
+     * Defaults to searching for "-BAD-", which Ghidra inserts when a struct member is deleted.
+     */
+    private McpSchema.CallToolResult executeSearchComments(Map<String, Object> arguments, Program currentProgram) {
+        String pattern = (String) arguments.get("pattern");
+        String structureName = (String) arguments.get("structure_name");
+        Boolean searchNamesFlag = (Boolean) arguments.get("search_names");
+
+        if (pattern == null || pattern.isEmpty()) {
+            pattern = "-BAD-";
+        }
+        boolean searchNames = searchNamesFlag != null && searchNamesFlag;
+        final String searchPattern = pattern.toLowerCase();
+
+        DataTypeManager dtm = currentProgram.getDataTypeManager();
+
+        StringBuilder result = new StringBuilder();
+        result.append("Searching struct field comments for: \"").append(pattern).append("\"");
+        if (searchNames) {
+            result.append(" (including field names)");
+        }
+        result.append("\n");
+        if (structureName != null && !structureName.isEmpty()) {
+            result.append("Limited to structure: ").append(structureName).append("\n");
+        }
+        result.append("\n");
+
+        int matchCount = 0;
+
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType dt = iter.next();
+            if (!(dt instanceof Structure)) {
+                continue;
+            }
+            Structure struct = (Structure) dt;
+
+            if (structureName != null && !structureName.isEmpty()) {
+                if (!struct.getName().equalsIgnoreCase(structureName)) {
+                    continue;
+                }
+            }
+
+            List<String> matchingFields = new ArrayList<>();
+            for (DataTypeComponent comp : struct.getComponents()) {
+                String comment = comp.getComment();
+                String fieldName = comp.getFieldName();
+
+                boolean matched = (comment != null && comment.toLowerCase().contains(searchPattern));
+                if (!matched && searchNames && fieldName != null) {
+                    matched = fieldName.toLowerCase().contains(searchPattern);
+                }
+
+                if (matched) {
+                    String desc = String.format("  offset +0x%X: %s %s",
+                        comp.getOffset(),
+                        comp.getDataType().getName(),
+                        fieldName != null ? fieldName : "(unnamed)");
+                    if (comment != null && !comment.isEmpty()) {
+                        desc += "  /* " + comment + " */";
+                    }
+                    matchingFields.add(desc);
+                }
+            }
+
+            if (!matchingFields.isEmpty()) {
+                result.append("Structure: ").append(struct.getPathName())
+                      .append("  (size ").append(struct.getLength()).append(" bytes)\n");
+                for (String field : matchingFields) {
+                    result.append(field).append("\n");
+                    matchCount++;
+                }
+                result.append("\n");
+            }
+        }
+
+        if (matchCount == 0) {
+            result.append("No matching fields found.\n");
+        } else {
+            result.append("Total matching fields: ").append(matchCount).append("\n");
+        }
+
+        return McpSchema.CallToolResult.builder()
+            .addTextContent(result.toString())
+            .build();
+    }
+
+    // ========== FIND_ENUM_USE ACTION ==========
+
+    /**
+     * Find all struct fields whose data type is (or resolves through pointer/array/typedef to) a given enum.
+     */
+    private McpSchema.CallToolResult executeFindEnumUse(Map<String, Object> arguments, Program currentProgram) {
+        String enumName = (String) arguments.get("enum_name");
+        String structFilter = (String) arguments.get("pattern");
+
+        if (enumName == null || enumName.isEmpty()) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("enum_name parameter is required for find_enum_use action")
+                .build();
+        }
+
+        DataTypeManager dtm = currentProgram.getDataTypeManager();
+
+        // Find the target enum data type
+        ghidra.program.model.data.Enum targetEnum = null;
+        Iterator<DataType> allTypes = dtm.getAllDataTypes();
+        while (allTypes.hasNext()) {
+            DataType dt = allTypes.next();
+            if (dt instanceof ghidra.program.model.data.Enum) {
+                if (dt.getName().equalsIgnoreCase(enumName) ||
+                        dt.getPathName().equalsIgnoreCase(enumName)) {
+                    targetEnum = (ghidra.program.model.data.Enum) dt;
+                    break;
+                }
+            }
+        }
+
+        if (targetEnum == null) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Enum '" + enumName + "' not found in data type manager")
+                .build();
+        }
+
+        final String finalEnumName = targetEnum.getName();
+        final String filterPattern = structFilter != null ? structFilter.toLowerCase() : null;
+
+        StringBuilder result = new StringBuilder();
+        result.append("Struct fields using enum '").append(finalEnumName).append("':\n\n");
+
+        int matchCount = 0;
+
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType dt = iter.next();
+            if (!(dt instanceof Structure)) {
+                continue;
+            }
+            Structure struct = (Structure) dt;
+
+            if (filterPattern != null && !struct.getName().toLowerCase().contains(filterPattern)) {
+                continue;
+            }
+
+            List<String> matchingFields = new ArrayList<>();
+            for (DataTypeComponent comp : struct.getDefinedComponents()) {
+                DataType baseType = unwrapToBaseType(comp.getDataType());
+                if (baseType instanceof ghidra.program.model.data.Enum &&
+                        baseType.getName().equals(finalEnumName)) {
+                    String fieldName = comp.getFieldName();
+                    String comment = comp.getComment();
+                    String desc = String.format("  offset +0x%X: %s %s",
+                        comp.getOffset(),
+                        comp.getDataType().getName(),
+                        fieldName != null ? fieldName : "(unnamed)");
+                    if (comment != null && !comment.isEmpty()) {
+                        desc += "  /* " + comment + " */";
+                    }
+                    matchingFields.add(desc);
+                }
+            }
+
+            if (!matchingFields.isEmpty()) {
+                result.append("Structure: ").append(struct.getPathName())
+                      .append("  (size ").append(struct.getLength()).append(" bytes)\n");
+                for (String field : matchingFields) {
+                    result.append(field).append("\n");
+                    matchCount++;
+                }
+                result.append("\n");
+            }
+        }
+
+        if (matchCount == 0) {
+            result.append("No struct fields found using enum '").append(finalEnumName).append("'.\n");
+        } else {
+            result.append("Total matching fields: ").append(matchCount).append("\n");
+        }
+
+        return McpSchema.CallToolResult.builder()
+            .addTextContent(result.toString())
+            .build();
+    }
+
+    /**
+     * Unwrap pointer/array/typedef indirections to reach the base data type.
+     */
+    private DataType unwrapToBaseType(DataType dt) {
+        int limit = 16;
+        while (limit-- > 0) {
+            if (dt instanceof TypeDef) {
+                dt = ((TypeDef) dt).getBaseDataType();
+            } else if (dt instanceof PointerDataType) {
+                dt = ((PointerDataType) dt).getDataType();
+                if (dt == null) break;
+            } else if (dt instanceof ArrayDataType) {
+                dt = ((ArrayDataType) dt).getDataType();
+            } else {
+                break;
+            }
+        }
+        return dt;
+    }
+
+    // ========== REPLACE_TYPE ACTION ==========
+
+    /**
+     * Replace all uses of one structure data type with another, propagating to all variables,
+     * fields, and typedefs — equivalent to Ghidra's "Replace Data Type" UI action.
+     */
+    private McpSchema.CallToolResult executeReplaceType(Map<String, Object> arguments, Program currentProgram) {
+        String structureName = (String) arguments.get("structure_name");
+        String replacementName = (String) arguments.get("replacement_name");
+
+        if (structureName == null || structureName.isEmpty()) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("structure_name parameter is required for replace_type action")
+                .build();
+        }
+        if (replacementName == null || replacementName.isEmpty()) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("replacement_name parameter is required for replace_type action")
+                .build();
+        }
+
+        DataTypeManager dtm = currentProgram.getDataTypeManager();
+
+        Structure existingStruct = findStructure(dtm, structureName);
+        if (existingStruct == null) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Structure '" + structureName + "' not found")
+                .build();
+        }
+
+        Structure replacementStruct = findStructure(dtm, replacementName);
+        if (replacementStruct == null) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Replacement structure '" + replacementName + "' not found")
+                .build();
+        }
+
+        if (existingStruct.getUniversalID().equals(replacementStruct.getUniversalID())) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Source and replacement structures are the same")
+                .build();
+        }
+
+        int txId = currentProgram.startTransaction("Replace Data Type");
+        boolean committed = false;
+        try {
+            dtm.replaceDataType(existingStruct, replacementStruct, false);
+            committed = true;
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Successfully replaced all uses of '" + structureName +
+                    "' with '" + replacementName + "'")
+                .build();
+        } catch (Exception e) {
+            String msg = "Error replacing data type: " + e.getMessage();
+            Msg.error(this, msg, e);
+            return McpSchema.CallToolResult.builder()
+                .addTextContent(msg)
+                .build();
+        } finally {
+            currentProgram.endTransaction(txId, committed);
+        }
     }
 }
