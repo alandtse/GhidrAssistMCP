@@ -36,6 +36,7 @@ import ghidrassistmcp.tools.CommentsTool;
 import ghidrassistmcp.tools.CreateDataVarTool;
 import ghidrassistmcp.tools.EnumTool;
 import ghidrassistmcp.tools.EquateTool;
+import ghidrassistmcp.tools.EvalPythonTool;
 import ghidrassistmcp.tools.GetBasicBlocksTool;
 import ghidrassistmcp.tools.GetCodeTool;
 import ghidrassistmcp.tools.GetCurrentAddressTool;
@@ -77,6 +78,10 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
     private final Map<String, McpTool> tools = new ConcurrentHashMap<>();
     private final Map<String, Boolean> toolEnabledStates = new ConcurrentHashMap<>();
+    private boolean agenticMode = true; // Default to true for token efficiency
+    private static final java.util.Set<String> CORE_TOOLS = java.util.Set.of(
+        "list_binaries", "eval_python", "get_task_status", "list_tasks", "cancel_task"
+    );
     private final List<McpEventListener> eventListeners = new CopyOnWriteArrayList<>();
     private volatile GhidrAssistMCPManager manager;
     private volatile boolean asyncExecutionEnabled = true;
@@ -149,6 +154,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         // Register enum and equate tools
         registerTool(new EnumTool());
         registerTool(new EquateTool());
+        registerTool(new EvalPythonTool());
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }
@@ -174,8 +180,13 @@ public class GhidrAssistMCPBackend implements McpBackend {
     public List<McpSchema.Tool> getAvailableTools() {
         List<McpSchema.Tool> toolList = new ArrayList<>();
         for (McpTool tool : tools.values()) {
-            // Only include enabled tools in the available tools list
-            if (toolEnabledStates.getOrDefault(tool.getName(), true)) {
+            String toolName = tool.getName();
+            // In agentic mode, only show core tools to save tokens
+            if (agenticMode && !CORE_TOOLS.contains(toolName)) {
+                continue;
+            }
+            // Only include enabled tools in any mode
+            if (toolEnabledStates.getOrDefault(toolName, true)) {
                 // Augment the schema with program_name parameter for multi-program support
                 McpSchema.JsonSchema augmentedSchema = augmentSchemaWithProgramName(tool.getInputSchema());
 
