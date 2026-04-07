@@ -176,3 +176,24 @@ tasks.register('uninstallExtension') {
 	description = "Delete the extracted extension and remove copied extension zip(s)"
 	dependsOn tasks.named('cleanExtractedExtension'), tasks.named('cleanCopiedExtensionZips')
 }
+
+/**
+ * Fast iteration install for development — closes Ghidra requirement:
+ *
+ *   gradle installDevExtension   — build, delete extracted folder, re-extract (requires Ghidra closed)
+ *   gradle uninstallDevExtension — remove the extracted extension
+ *
+ * Ghidra locks all JARs in the extracted folder while running, so Ghidra must be
+ * closed before running this task. Reopen Ghidra after it completes.
+ */
+tasks.register('installDevExtension') {
+	group = "Ghidra"
+	description = "Build and replace the extracted extension in-place (requires Ghidra to be closed). Reopen Ghidra after."
+	dependsOn tasks.named('extractExtension')
+}
+
+tasks.register('uninstallDevExtension', Delete) {
+	group = "Ghidra"
+	description = "Remove the ${extensionName} extension from Ghidra's user Extensions folder"
+	delete new File(ghidraUserExtensionsDir, extensionName)
+}
