@@ -269,6 +269,24 @@ Equates associate symbolic names with constant integer values used in disassembl
 | --------- | ----------- |
 | `script`  | Execute arbitrary Python 3 code in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or it falls back to Jython 2.7). The global variables `currentProgram`, `currentAddress`, and `monitor` are automatically accessible in your scripts. |
 
+A `ghidra` helper object is pre-injected with common operations:
+
+| Helper | Description |
+| ------ | ----------- |
+| `ghidra.decompile(id)` | Decompile a function by name or address |
+| `ghidra.get_func(id)` | Return a `Function` object by name or address |
+| `ghidra.get_program(name)` | Return an open `Program` object by name |
+| `ghidra.get_refs_to(addr)` | List all callers of an address |
+| `ghidra.set_comment(addr, text, type)` | Set an EOL/PRE/POST/PLATE comment |
+| `ghidra.find_struct(name)` | Return a `Structure` data type object |
+| `ghidra.read_bytes(addr, length)` | Read memory as a hex string |
+| `ghidra.copy_datatype(name, from_prog, to_prog)` | Copy a struct/enum between open programs |
+| `ghidra.list_vt_sessions()` | List open Version Tracking sessions: `[{name, src, dst, match_count}]` |
+| `ghidra.get_vt_session(idx=0)` | Return a `VTSession` by index |
+| `ghidra.get_vt_matches(session, status)` | Return `[{src, dst, status, similarity, confidence}]`; filter by `ACCEPTED`/`REJECTED`/`AVAILABLE` |
+| `ghidra.find_addr_in_version(addr, session)` | Find the accepted destination address for a source address across binary versions |
+| `ghidra.accept_vt_match(src_addr, session)` | Accept the first available VT match for a source address |
+
 ### Search Tools
 
 | Tool | Description |
