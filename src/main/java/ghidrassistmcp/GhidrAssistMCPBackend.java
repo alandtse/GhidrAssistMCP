@@ -88,7 +88,8 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private final Map<String, Boolean> toolEnabledStates = new ConcurrentHashMap<>();
     private boolean agenticMode = true; // Default to true for token efficiency
     private static final java.util.Set<String> CORE_TOOLS = java.util.Set.of(
-        "list_binaries", "eval_python", "get_task_status", "list_tasks", "cancel_task"
+        "list_binaries", "eval_python", "get_task_status", "list_tasks", "cancel_task",
+        "debugger"  // session management — needed to check/connect debugger before using dbg.* in eval_python
     );
     private final List<McpEventListener> eventListeners = new CopyOnWriteArrayList<>();
     private volatile GhidrAssistMCPManager manager;
