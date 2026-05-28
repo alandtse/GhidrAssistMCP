@@ -101,9 +101,33 @@ class GhidraHelpers:
         ct = {'eol': CommentType.EOL, 'pre': CommentType.PRE, 'post': CommentType.POST, 'plate': CommentType.PLATE}.get(type, CommentType.EOL)
         currentProgram.getListing().setComment(self.get_addr(addr), ct, text)
     def find_struct(self, name):
+        '''Return the Structure DataType object (for downstream operations).
+        WARNING: stringifying this object emits the entire field table — for a
+        large class like PlayerCharacter that's ~6KB. Use struct_summary(name)
+        for a compact dict, or struct_fields(name) for a slim field list.'''
         for dt in currentProgram.getDataTypeManager().getAllDataTypes():
             if dt.getName() == name and 'Structure' in type(dt).__name__: return dt
         return None
+    def struct_summary(self, name):
+        '''Compact summary of a struct: {name, size, field_count, category}.
+        Use this when you just want to confirm a struct exists without dumping it.'''
+        dt = self.find_struct(name)
+        if not dt: return None
+        return {'name': dt.getName(), 'size': dt.getLength(),
+                'field_count': len(list(dt.getDefinedComponents())),
+                'category': str(dt.getCategoryPath())}
+    def struct_fields(self, name, prefix=None):
+        '''Slim field list: [(offset, fname, type_name, size)] tuples.
+        Cheaper than printing the DataType (which dumps full type definitions).
+        prefix: optional substring filter on field name (e.g. "vrInfo").'''
+        dt = self.find_struct(name)
+        if not dt: return []
+        out = []
+        for c in dt.getDefinedComponents():
+            fn = c.getFieldName() or ''
+            if prefix and prefix.lower() not in fn.lower(): continue
+            out.append((c.getOffset(), fn, c.getDataType().getName(), c.getLength()))
+        return out
     def read_bytes(self, addr, length):
         try:
             b = currentProgram.getMemory().getBytes(self.get_addr(addr), length)

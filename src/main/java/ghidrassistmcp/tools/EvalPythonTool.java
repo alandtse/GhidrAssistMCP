@@ -83,8 +83,10 @@ public class EvalPythonTool implements McpTool {
             "currentProgram.getSymbolTable().getSymbols('name') or getFunctionManager().getFunctions(True); " +
             "AVOID getSymbolIterator() (unbounded, can stall).\n\n" +
             "Three injected helper objects (use dir(x) or help(x.method) for per-method docs):\n" +
-            "  ghidra.* — static analysis: decompile, get_func, find_struct, get_refs_to, set_comment, " +
-            "read_bytes; VT helpers (get_vt_sessions, get_vt_matches, find_addr_in_version, accept_vt_match).\n" +
+            "  ghidra.* — static analysis: decompile, get_func, get_refs_to, set_comment, read_bytes. " +
+            "Structs: struct_summary(name) and struct_fields(name) for compact output; " +
+            "find_struct(name) returns the raw DataType (large — stringifying dumps every field). " +
+            "VT helpers: get_vt_sessions, get_vt_matches, find_addr_in_version, accept_vt_match.\n" +
             "  dbg.*    — live debugger (call dbg.status() first). Memory, registers, breakpoints, stepping, " +
             "dbg.list_modules() for runtime bases, dbg.detach() for clean disconnect, dbg.cleanup() to compact trace.\n" +
             "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static), RTTI (rtti/class_hierarchy/vtable_methods), " +
