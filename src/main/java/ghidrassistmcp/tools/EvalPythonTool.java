@@ -78,7 +78,8 @@ public class EvalPythonTool implements McpTool {
     @Override
     public String getDescription() {
         return "Execute Python in Ghidra's context. Requires pyghidra (Python 3) or falls back to Jython 2.7. " +
-            "Async: every call submits a task; poll get_task_status with the returned task_id.\n\n" +
+            "Async by default: returns a task_id; poll get_task_status. Pass {\"sync\": true} for inline " +
+            "result on quick scripts (<2s) — skips the poll round-trip.\n\n" +
             "Globals: currentProgram, currentAddress, monitor, state. Symbol search: prefer " +
             "currentProgram.getSymbolTable().getSymbols('name') or getFunctionManager().getFunctions(True); " +
             "AVOID getSymbolIterator() (unbounded, can stall).\n\n" +
@@ -107,6 +108,10 @@ public class EvalPythonTool implements McpTool {
                 Map.entry("script", Map.of(
                     "type", "string",
                     "description", "The Python script content to execute. Variables like 'currentProgram' and 'monitor' are globally available, just like a standard Ghidra Script."
+                )),
+                Map.entry("sync", Map.of(
+                    "type", "boolean",
+                    "description", "If true, execute synchronously and return the result inline — skips the task-id round-trip. Use for quick scripts (<2s). Default false (async via task manager) to avoid blocking on long-running operations like full RTTI scans."
                 ))
             ),
             List.of("script"), null, null, null);

@@ -330,8 +330,12 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 }
             }
 
-            // Check if this is a long-running tool that should be executed asynchronously
-            if (tool.isLongRunning() && asyncExecutionEnabled) {
+            // Check if this is a long-running tool that should be executed asynchronously.
+            // Callers can override per-call via {"sync": true} in arguments to force the
+            // synchronous path even for long-running tools (saves a get_task_status round-trip
+            // for scripts the caller knows will complete quickly).
+            boolean syncOverride = Boolean.TRUE.equals(arguments.get("sync"));
+            if (tool.isLongRunning() && asyncExecutionEnabled && !syncOverride) {
                 return executeToolAsync(tool, toolName, arguments, targetProgram);
             }
 
