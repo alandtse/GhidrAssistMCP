@@ -516,17 +516,24 @@ class REngHelpers:
     MSVC x64 RTTI layout: obj[0]=vtable_ptr, vtable[-8]=RTTICompleteObjectLocator (COL),
       COL+0=sig(1), COL+12=TypeDescriptor_RVA, TypeDescriptor+16=mangled_name(.?AV<class>@@)
     '''
-    _image_base_cache = None
-    _vtable_cache = None
+    # Caches keyed by currentProgram.getName() so switching programs returns the
+    # right values instead of leaking the previous program's image base/vtables.
+    _image_base_cache = {}
+    _vtable_cache = {}
+
+    def _prog_key(self):
+        return currentProgram.getName() if currentProgram else None
 
     def image_base(self):
         '''Runtime image base of currentProgram binary.
         Strategy: query the live trace's module manager (canonical, exact),
         fall back to parsing debugger thread name strings if no trace is active
         or the module isn't loaded yet.
+        Cache is keyed by program name so switching programs returns the right value.
         Returns int or None if no debugger session.'''
-        if self._image_base_cache: return self._image_base_cache
         if not currentProgram: return None
+        key = self._prog_key()
+        if key in self._image_base_cache: return self._image_base_cache[key]
         prog_name   = currentProgram.getName()
         static_base = currentProgram.getImageBase().getOffset()
 
@@ -538,8 +545,8 @@ class REngHelpers:
                 for m in trace.getModuleManager().getAllModules():
                     mod_name = str(m.getName(snap))
                     if mod_name.lower().endswith(prog_name.lower()):
-                        self._image_base_cache = m.getBase(snap).getOffset()
-                        return self._image_base_cache
+                        self._image_base_cache[key] = m.getBase(snap).getOffset()
+                        return self._image_base_cache[key]
         except Exception: pass
 
         # Strategy 2 (fallback): parse debugger thread names
@@ -556,8 +563,8 @@ class REngHelpers:
                     static_fn = int(m.group(2), 16)
                     offset    = int(m.group(3), 16)
                     rt_fn     = int(m.group(4).replace('`',''), 16) - offset
-                    self._image_base_cache = rt_fn - (static_fn - static_base)
-                    return self._image_base_cache
+                    self._image_base_cache[key] = rt_fn - (static_fn - static_base)
+                    return self._image_base_cache[key]
 
                 # Pattern 2: Module!anything_STATICADDR (RUNTIME_ADDR) — SkyrimVR thunks
                 # Thread is AT the function start (no +0x offset)
@@ -565,8 +572,8 @@ class REngHelpers:
                 if m2:
                     static_fn = int(m2.group(1), 16)
                     rt_fn     = int(m2.group(2).replace('`',''), 16)
-                    self._image_base_cache = rt_fn - (static_fn - static_base)
-                    return self._image_base_cache
+                    self._image_base_cache[key] = rt_fn - (static_fn - static_base)
+                    return self._image_base_cache[key]
         except Exception as e: pass
         return None
 
@@ -848,9 +855,11 @@ class REngHelpers:
 
     def scan_vtables(self, prog=None):
         '''Scan RTTI in .rdata and return {vtable_static_addr: class_name}.
-        Uses native Memory.findBytes — fast. Results are cached after first call.
+        Uses native Memory.findBytes — fast. Results are cached per-program.
         Equivalent to scanning for all MSVC class vtables in a PE binary.'''
-        if self._vtable_cache: return self._vtable_cache
+        p_for_key = prog or currentProgram
+        key = p_for_key.getName() if p_for_key else None
+        if key in self._vtable_cache: return self._vtable_cache[key]
         import re as _re
         import ghidra.util.task.TaskMonitor as _TM
         import struct as _st
@@ -898,7 +907,7 @@ class REngHelpers:
             col_ghidra = ds.getAddress(col_addr)
             for ref in rm.getReferencesTo(col_ghidra):
                 vtmap[ref.getFromAddress().getOffset() + 8] = class_name
-        self._vtable_cache = vtmap
+        if key: self._vtable_cache[key] = vtmap
         return vtmap
 
     def rename_vfuncs(self, vtable_map=None, dry_run=False):
@@ -1529,7 +1538,7 @@ class REngHelpers:
                 result.append('  → function: %s @ 0x%x' % (fn.getName(True), static))
             else:
                 rtti = self.rtti(u64)
-                vtmap = self._vtable_cache or {}
+                vtmap = self._vtable_cache.get(self._prog_key(), {})
                 cls = vtmap.get(static, rtti)
                 result.append('  → SkyrimSE ptr%s' % ((' → class: %s' % cls) if cls else ''))
                 if rtti: result.append('  → RTTI says: %s*' % rtti)
