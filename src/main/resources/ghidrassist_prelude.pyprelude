@@ -446,19 +446,37 @@ class REngHelpers:
     _vtable_cache = None
 
     def image_base(self):
-        '''Runtime image base of currentProgram binary. Inferred from debugger thread names.
+        '''Runtime image base of currentProgram binary.
+        Strategy: query the live trace's module manager (canonical, exact),
+        fall back to parsing debugger thread name strings if no trace is active
+        or the module isn't loaded yet.
         Returns int or None if no debugger session.'''
         if self._image_base_cache: return self._image_base_cache
+        if not currentProgram: return None
+        prog_name   = currentProgram.getName()
+        static_base = currentProgram.getImageBase().getOffset()
+
+        # Strategy 1 (canonical): query trace module manager
+        try:
+            trace = dbg.get_trace()
+            if trace is not None:
+                snap = dbg.get_snap()
+                for m in trace.getModuleManager().getAllModules():
+                    mod_name = str(m.getName(snap))
+                    if mod_name.lower().endswith(prog_name.lower()):
+                        self._image_base_cache = m.getBase(snap).getOffset()
+                        return self._image_base_cache
+        except Exception: pass
+
+        # Strategy 2 (fallback): parse debugger thread names
         import re as _re
-        prog_name   = currentProgram.getName().replace('.exe','') if currentProgram else ''
-        static_base = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
-        esc = _re.escape(prog_name)
+        short_name = prog_name.replace('.exe','')
+        esc = _re.escape(short_name)
         try:
             for t in dbg.get_threads():
                 name = t.getName(0)
-                if prog_name.lower() not in name.lower(): continue
-
-                # Pattern 1: Module!FUN_STATICADDR+0xOFFSET (RUNTIME_ADDR) — SkyrimSE
+                if short_name.lower() not in name.lower(): continue
+                # Pattern 1: Module!FUN_STATICADDR+0xOFFSET (RUNTIME_ADDR) — SkyrimSE style
                 m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))\+0x([0-9a-fA-F]+)\s+\(([0-9a-fA-F`]+)\)' % esc, name, _re.I)
                 if m:
                     static_fn = int(m.group(2), 16)
