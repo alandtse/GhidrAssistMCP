@@ -173,6 +173,26 @@ class DebuggerHelpers:
     '''
     def _tool(self):
         return state.getTool()
+
+    @staticmethod
+    def _normalize_addr(addr):
+        '''Normalize an address arg (int, hex string with or without 0x prefix,
+        decimal string) to a (int_value, hex_string, ghidra_address) triple.
+        Use this everywhere a breakpoint/memory method accepts an address.'''
+        if isinstance(addr, int):
+            addr_int = addr
+        else:
+            s = str(addr).strip().lower()
+            if s.startswith('0x'): addr_int = int(s, 16)
+            elif all(c in '0123456789abcdef' for c in s) and any(c in 'abcdef' for c in s):
+                addr_int = int(s, 16)
+            else:
+                # Plain digits — assume hex (Ghidra/RE convention)
+                addr_int = int(s, 16)
+        hex_str = '0x%x' % addr_int
+        ghidra_addr = currentProgram.getAddressFactory().getAddress(hex_str)
+        return addr_int, hex_str, ghidra_addr
+
     def _svc(self, cls_fqn):
         try:
             parts = cls_fqn.rsplit('.', 1)
@@ -396,7 +416,8 @@ class DebuggerHelpers:
         except Exception as e: steps.append('close-conn-err: %s' % e)
         return ' → '.join(steps)
     def list_breakpoints(self):
-        '''List all logical breakpoints as list of {address, state, kinds, length} dicts.'''
+        '''List all logical breakpoints as list of {address, state, kinds, length} dicts.
+        Address is formatted as 0x... hex matching set_breakpoint/delete_breakpoints output.'''
         try:
             svc = self.get_bp_service()
             if not svc: return [{'error': 'DebuggerLogicalBreakpointService not loaded'}]
@@ -404,7 +425,7 @@ class DebuggerHelpers:
             for bp in svc.getAllBreakpoints():
                 try:
                     result.append({
-                        'address': str(bp.getAddress()),
+                        'address': '0x%x' % bp.getAddress().getOffset(),
                         'state': bp.computeState().name(),
                         'kinds': str(bp.getKinds()),
                         'length': bp.getLength(),
@@ -472,38 +493,37 @@ class DebuggerHelpers:
             import java.util.Set as _JSet
             if self.get_trace() is not None:
                 self.ensure_static_mapping()
-            # Normalize address — accept int or hex string, always echo as 0x...
-            if isinstance(addr, int):
-                addr_int = addr
-            else:
-                addr_int = int(str(addr).replace('0x', '').replace('0X', ''), 16)
-            prog_addr = currentProgram.getAddressFactory().getAddress('0x%x' % addr_int)
+            addr_int, hex_str, prog_addr = self._normalize_addr(addr)
             kinds = _JSet.of(TraceBreakpointKind.SW_EXECUTE)
             future = svc.placeBreakpointAt(currentProgram, prog_addr, length, kinds, name)
             future.get()
             # Verify placement by querying back
             placed = list(svc.getBreakpointsAt(currentProgram, prog_addr))
             if not placed:
-                return {'ok': False, 'address': '0x%x' % addr_int,
+                return {'ok': False, 'address': hex_str,
                         'message': 'placeBreakpointAt returned but no logical breakpoint exists at this address — likely a stale mapping or unloaded module'}
             bp = placed[0]
-            state = bp.computeState().name()
-            return {'ok': True, 'address': '0x%x' % addr_int, 'state': state,
-                    'message': 'INEFFECTIVE_ENABLED means placed but not yet armed (check control_mode and ensure_static_mapping)' if state == 'INEFFECTIVE_ENABLED' else ''}
+            bp_state = bp.computeState().name()
+            return {'ok': True, 'address': hex_str, 'state': bp_state,
+                    'message': 'INEFFECTIVE_ENABLED means placed but not yet armed (check control_mode and ensure_static_mapping)' if bp_state == 'INEFFECTIVE_ENABLED' else ''}
         except Exception as e:
             return {'ok': False, 'message': 'error: ' + str(e)}
     def delete_breakpoints(self, addr):
-        '''Delete all logical breakpoints at addr in the current program.'''
+        '''Delete all logical breakpoints at addr (STATIC Ghidra address).
+        Accepts int, hex string with or without 0x prefix, or decimal — same as set_breakpoint.
+        Returns {ok, address: '0x...', deleted: N, message}.'''
         try:
             svc = self.get_bp_service()
-            if not svc: return 'DebuggerLogicalBreakpointService not loaded'
-            prog_addr = currentProgram.getAddressFactory().getAddress(str(addr))
-            bps = svc.getBreakpointsAt(currentProgram, prog_addr)
-            if not bps: return 'no breakpoints at ' + str(addr)
+            if not svc: return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
+            addr_int, hex_str, prog_addr = self._normalize_addr(addr)
+            bps = list(svc.getBreakpointsAt(currentProgram, prog_addr))
+            if not bps:
+                return {'ok': False, 'address': hex_str, 'deleted': 0,
+                        'message': 'no breakpoints at ' + hex_str}
             futures = [bp.delete() for bp in bps]
             for f in futures: f.get()
-            return 'ok: deleted ' + str(len(futures)) + ' breakpoint(s) at ' + str(addr)
-        except Exception as e: return 'error: ' + str(e)
+            return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': ''}
+        except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
     def get_stack(self, thread=None, snap=None):
         '''Stack frames for the current (or given) thread as list of {level, pc} dicts.
         pc is raw program-counter from the trace; use static mapping to resolve to symbols.'''
