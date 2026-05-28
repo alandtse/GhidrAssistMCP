@@ -476,7 +476,380 @@ public class EvalPythonTool implements McpTool {
         "                'control_mode': str(self._svc('ghidra.app.services.DebuggerControlService').getCurrentMode(trace)) if self._svc('ghidra.app.services.DebuggerControlService') else 'unknown'\n" +
         "            }\n" +
         "        except Exception as e: return {'connected': False, 'error': str(e)}\n" +
-        "dbg = DebuggerHelpers()\n\n";
+        "dbg = DebuggerHelpers()\n\n" +
+        // ── Reverse-engineering helpers ────────────────────────────────────────────────
+        // Injected as `reng`. Game/platform-agnostic utilities for dynamic RE.
+        // Works with or without a live debugger session.
+        //
+        // ReClass.NET workflow (live struct exploration):
+        //   reng.explore(rt_addr)         → field table with auto-type interpretation
+        //   reng.rtti(rt_ptr)             → decode MSVC x64 RTTI class name
+        //   reng.read_struct(rt_addr, fields) → read named fields at offsets
+        //   reng.define_struct(name, fields)  → create/update StructureDataType in Ghidra
+        //   reng.apply_struct(rt_addr, name)  → apply named struct at static address
+        //
+        // Address conversion (ASLR):
+        //   reng.image_base()             → runtime image base (inferred from debugger)
+        //   reng.to_rt(static_addr)       → static Ghidra addr → runtime addr
+        //   reng.to_static(rt_addr)       → runtime addr → static Ghidra addr
+        //
+        // RTTI/vtable scanner (builds vtable→class map from static .rdata):
+        //   reng.scan_vtables(prog=None)  → {vtable_static_addr: class_name} — scans RTTI
+        //   reng.rename_vfuncs(vtable_map) → bulk-rename FUN_* into class namespaces
+        "class REngHelpers:\n" +
+        "    '''Platform-agnostic reverse engineering utilities. Works best with dbg connected.\n" +
+        "    Workflow: reng.image_base() → reng.rtti(ptr) → reng.explore(ptr) → reng.define_struct(...)\n" +
+        "    MSVC x64 RTTI layout: obj[0]=vtable_ptr, vtable[-8]=RTTICompleteObjectLocator (COL),\n" +
+        "      COL+0=sig(1), COL+12=TypeDescriptor_RVA, TypeDescriptor+16=mangled_name(.?AV<class>@@)\n" +
+        "    '''\n" +
+        "    _image_base_cache = None\n" +
+        "    _vtable_cache = None\n" +
+        "\n" +
+        "    def image_base(self):\n" +
+        "        '''Runtime image base of currentProgram binary. Inferred from debugger thread names.\n" +
+        "        Returns int or None if no debugger session.'''\n" +
+        "        if self._image_base_cache: return self._image_base_cache\n" +
+        "        import re as _re\n" +
+        "        prog_name = currentProgram.getName().replace('.exe','') if currentProgram else ''\n" +
+        "        static_base = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000\n" +
+        "        try:\n" +
+        "            for t in dbg.get_threads():\n" +
+        "                name = t.getName(0)\n" +
+        "                # Match: ModuleName!FuncName+0xOFF (0xADDR) or similar WinDbg format\n" +
+        "                m = _re.search(r'%s![^+\\s]+\\+0x([0-9a-fA-F]+)\\s+\\(([0-9a-fA-F`]+)\\)' % _re.escape(prog_name), name, _re.I)\n" +
+        "                if not m:\n" +
+        "                    m = _re.search(r'%s!([^+\\s]+)\\+0x([0-9a-fA-F]+)' % _re.escape(prog_name), name, _re.I)\n" +
+        "                if m:\n" +
+        "                    groups = m.groups()\n" +
+        "                    offset = int(groups[-2], 16)\n" +
+        "                    rt_pc  = int(groups[-1].replace('`',''), 16)\n" +
+        "                    rt_fn  = rt_pc - offset\n" +
+        "                    # Find the static function address from the display name\n" +
+        "                    full = name\n" +
+        "                    fn_m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))' % _re.escape(prog_name), full, _re.I)\n" +
+        "                    if fn_m:\n" +
+        "                        static_fn = int(fn_m.group(2), 16)\n" +
+        "                        self._image_base_cache = rt_fn - (static_fn - static_base)\n" +
+        "                        return self._image_base_cache\n" +
+        "        except Exception as e: pass\n" +
+        "        return None\n" +
+        "\n" +
+        "    def to_rt(self, static_addr):\n" +
+        "        '''Convert static Ghidra address to runtime address (applies ASLR offset).'''\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000\n" +
+        "        return static_addr - sb + ib if ib else None\n" +
+        "\n" +
+        "    def to_static(self, rt_addr):\n" +
+        "        '''Convert runtime address to static Ghidra address (removes ASLR offset).'''\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000\n" +
+        "        return rt_addr - ib + sb if ib else None\n" +
+        "\n" +
+        "    def _read_mem_static(self, static_addr, n):\n" +
+        "        '''Read n bytes from static Ghidra program memory. Returns bytes or None.'''\n" +
+        "        try:\n" +
+        "            mem = currentProgram.getMemory()\n" +
+        "            ds  = currentProgram.getAddressFactory().getDefaultAddressSpace()\n" +
+        "            a   = ds.getAddress(static_addr)\n" +
+        "            buf = bytearray(n)\n" +
+        "            for i in range(n): buf[i] = mem.getByte(a.add(i)) & 0xff\n" +
+        "            return bytes(buf)\n" +
+        "        except: return None\n" +
+        "\n" +
+        "    def _read_rt(self, rt_addr, n):\n" +
+        "        '''Read n bytes from live trace memory. Returns bytes or None.'''\n" +
+        "        try:\n" +
+        "            hex_data = dbg.read_memory(rt_addr, n)\n" +
+        "            if 'error' in hex_data: return None\n" +
+        "            return bytes.fromhex(hex_data[:n*2])\n" +
+        "        except: return None\n" +
+        "\n" +
+        "    def rtti(self, rt_obj_ptr):\n" +
+        "        '''Decode MSVC x64 RTTI class name from a live object pointer.\n" +
+        "        Reads vtable ptr at [obj], then COL at vtable[-8], then TypeDescriptor.\n" +
+        "        Returns class name string or None.'''\n" +
+        "        import re as _re, struct as _st\n" +
+        "        try:\n" +
+        "            # Read vtable pointer at offset 0 of object\n" +
+        "            b = self._read_rt(rt_obj_ptr, 8)\n" +
+        "            if not b: return None\n" +
+        "            vtable_rt = _st.unpack_from('<Q', b)[0]\n" +
+        "            # Read COL pointer at vtable[-8]\n" +
+        "            b = self._read_rt(vtable_rt - 8, 8)\n" +
+        "            if not b: return None\n" +
+        "            col_rt = _st.unpack_from('<Q', b)[0]\n" +
+        "            # Convert COL to static and read from program memory\n" +
+        "            col_static = self.to_static(col_rt)\n" +
+        "            if not col_static: return None\n" +
+        "            col_bytes = self._read_mem_static(col_static, 24)\n" +
+        "            if not col_bytes or len(col_bytes) < 24: return None\n" +
+        "            sig = _st.unpack_from('<I', col_bytes, 0)[0]\n" +
+        "            if sig != 1: return None  # not x64 COL\n" +
+        "            td_rva = _st.unpack_from('<I', col_bytes, 12)[0]\n" +
+        "            sb = currentProgram.getImageBase().getOffset()\n" +
+        "            td_static = sb + td_rva\n" +
+        "            # TypeDescriptor+16 = mangled name\n" +
+        "            name_bytes = self._read_mem_static(td_static + 16, 128)\n" +
+        "            if not name_bytes: return None\n" +
+        "            name = name_bytes.split(b'\\x00')[0].decode('ascii', errors='replace')\n" +
+        "            m = _re.match(r'\\.\\?A[VUW]([^@]+)@', name)\n" +
+        "            return m.group(1) if m else name\n" +
+        "        except: return None\n" +
+        "\n" +
+        "    def explore(self, rt_addr, size=256):\n" +
+        "        '''ReClass.NET-style live struct explorer.\n" +
+        "        Reads `size` bytes at runtime address, interprets each 8-byte slot as:\n" +
+        "          ptr (→ RTTI class if SkyrimSE range), i64, f32, f64.\n" +
+        "        Auto-identifies vtable slot (offset 0), function pointers, null fields.\n" +
+        "        Returns formatted string table. Use to discover struct layout interactively.'''\n" +
+        "        import struct as _st\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0\n" +
+        "        fm = currentProgram.getFunctionManager() if currentProgram else None\n" +
+        "        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None\n" +
+        "        # Fetch memory\n" +
+        "        dbg.refresh_memory(rt_addr, size)\n" +
+        "        raw = self._read_rt(rt_addr, size)\n" +
+        "        if not raw: return 'Error: could not read 0x%x' % rt_addr\n" +
+        "        rtti_name = self.rtti(rt_addr)\n" +
+        "        lines = ['=== 0x%x  (%s)  %d bytes ===' % (rt_addr, rtti_name or '?', len(raw)),\n" +
+        "                 '%-6s %-16s %-22s %-12s %-12s  %s' % ('Off','Hex(LE)','As ptr','As i32/i64','As f32','Note')]\n" +
+        "        for off in range(0, len(raw) - 7, 8):\n" +
+        "            chunk = raw[off:off+8]\n" +
+        "            u64   = _st.unpack_from('<Q', chunk)[0]\n" +
+        "            i32   = _st.unpack_from('<i', chunk[:4])[0]\n" +
+        "            f32   = _st.unpack_from('<f', chunk[:4])[0]\n" +
+        "            note  = ''\n" +
+        "            ptr_str = ''\n" +
+        "            if u64 == 0:\n" +
+        "                note = 'null'\n" +
+        "            elif ib and ib <= u64 < ib + 0x10000000:\n" +
+        "                static = u64 - ib + sb\n" +
+        "                try:\n" +
+        "                    fn = fm.getFunctionAt(ds.getAddress(static)) if fm else None\n" +
+        "                    if fn:\n" +
+        "                        ptr_str = fn.getName(True)\n" +
+        "                        note = 'fn-ptr'\n" +
+        "                    else:\n" +
+        "                        # Could be vtable or object ptr\n" +
+        "                        if off == 0:\n" +
+        "                            note = 'vtable → %s' % (rtti_name or '?')\n" +
+        "                        else:\n" +
+        "                            sub_rtti = self.rtti(u64)\n" +
+        "                            ptr_str = '0x%x' % u64\n" +
+        "                            note = 'ptr→%s' % (sub_rtti if sub_rtti else 'SkyrimSE')\n" +
+        "                except: ptr_str = '0x%x' % u64\n" +
+        "            elif 0x7f0000000000 <= u64 <= 0x7fffffffffff:\n" +
+        "                ptr_str = '0x%x' % u64\n" +
+        "                note = 'ptr→DLL/heap'\n" +
+        "            elif 0 < u64 < 0x10000:\n" +
+        "                note = 'small_int=%d' % u64\n" +
+        "            elif abs(f32) > 1e-10 and abs(f32) < 1e8 and f32 == f32:  # not NaN, reasonable range\n" +
+        "                note = 'f32≈%.5g' % f32\n" +
+        "            lines.append('+%-5x %-16s %-22s %-12d %-12.5g  %s' % (\n" +
+        "                off, chunk.hex()[:16], ptr_str[:22], i32, f32, note))\n" +
+        "        return '\\n'.join(lines)\n" +
+        "\n" +
+        "    def read_struct(self, rt_addr, fields):\n" +
+        "        '''Read named fields from a live object at rt_addr.\n" +
+        "        fields = {name: (offset, type_str)}\n" +
+        "        type_str: u8/u16/u32/u64/i8/i16/i32/i64/f32/f64/ptr/cstr/wstr\n" +
+        "        Returns {name: value} dict. Example:\n" +
+        "          reng.read_struct(player_ptr, {\"health\":(0x54,\"f32\"), \"pos_x\":(0xD0,\"f32\")})\n" +
+        "        '''\n" +
+        "        import struct as _st\n" +
+        "        fmt = {'u8':('<B',1),'u16':('<H',2),'u32':('<I',4),'u64':('<Q',8),\n" +
+        "               'i8':('<b',1),'i16':('<h',2),'i32':('<i',4),'i64':('<q',8),\n" +
+        "               'f32':('<f',4),'f64':('<d',8),'ptr':('<Q',8)}\n" +
+        "        result = {}\n" +
+        "        for name, (off, typ) in fields.items():\n" +
+        "            addr = rt_addr + off\n" +
+        "            if typ in ('cstr', 'wstr'):\n" +
+        "                ptr_raw = self._read_rt(addr, 8)\n" +
+        "                ptr = _st.unpack_from('<Q', ptr_raw)[0] if ptr_raw else 0\n" +
+        "                if ptr:\n" +
+        "                    s_raw = self._read_rt(ptr, 128)\n" +
+        "                    if s_raw:\n" +
+        "                        if typ == 'wstr': result[name] = s_raw.decode('utf-16-le', errors='replace').split('\\x00')[0]\n" +
+        "                        else: result[name] = s_raw.split(b'\\x00')[0].decode('utf-8', errors='replace')\n" +
+        "                    else: result[name] = None\n" +
+        "                else: result[name] = None\n" +
+        "            elif typ in fmt:\n" +
+        "                f, sz = fmt[typ]\n" +
+        "                b = self._read_rt(addr, sz)\n" +
+        "                result[name] = _st.unpack(f, b)[0] if b else None\n" +
+        "            else: result[name] = 'unknown type: ' + typ\n" +
+        "        return result\n" +
+        "\n" +
+        "    def define_struct(self, name, fields, category='/'):\n" +
+        "        '''Create or update a StructureDataType in Ghidra's data type manager.\n" +
+        "        fields = {field_name: (offset, size, comment)}\n" +
+        "        If a struct with this name already exists, existing named fields are PRESERVED\n" +
+        "        and only new/overlapping fields from `fields` are added/updated.\n" +
+        "        Returns the StructureDataType or error string.\n" +
+        "        Tip: call with fields={} to inspect an existing struct definition.'''\n" +
+        "        from ghidra.program.model.data import StructureDataType, CategoryPath, DataTypeConflictHandler\n" +
+        "        from ghidra.program.model.data import ByteDataType, DWordDataType, QWordDataType, FloatDataType, Undefined\n" +
+        "        dtm = currentProgram.getDataTypeManager()\n" +
+        "        cat = CategoryPath(category)\n" +
+        "        size_to_dt = {1: ByteDataType.dataType, 2: Undefined.getUndefinedDataType(2),\n" +
+        "                      4: DWordDataType.dataType, 8: QWordDataType.dataType}\n" +
+        "        # Check for existing struct\n" +
+        "        existing = None\n" +
+        "        for dt in dtm.getAllDataTypes():\n" +
+        "            if dt.getName() == name and hasattr(dt, 'getComponents'):\n" +
+        "                existing = dt\n" +
+        "                break\n" +
+        "        if existing is not None and not fields:\n" +
+        "            # Inspection mode: return summary of existing struct\n" +
+        "            lines = ['Existing struct %s (%d bytes):' % (name, existing.getLength())]\n" +
+        "            for comp in existing.getComponents():\n" +
+        "                fname = comp.getFieldName() or ''\n" +
+        "                lines.append('  +0x%x  %-4d  %-20s  %s' % (\n" +
+        "                    comp.getOffset(), comp.getLength(),\n" +
+        "                    fname, comp.getComment() or ''))\n" +
+        "            return '\\n'.join(lines)\n" +
+        "        # Build merged field map: start from existing, override/add with new fields\n" +
+        "        merged = {}  # offset -> (fname, size, comment)\n" +
+        "        if existing is not None:\n" +
+        "            for comp in existing.getComponents():\n" +
+        "                fname = comp.getFieldName()\n" +
+        "                if fname:  # only preserve named fields\n" +
+        "                    merged[comp.getOffset()] = (fname, comp.getLength(), comp.getComment() or '')\n" +
+        "        for fname, (off, sz, comment) in fields.items():\n" +
+        "            merged[off] = (fname, sz, comment)\n" +
+        "        # Determine struct size\n" +
+        "        if merged:\n" +
+        "            total = max(off + sz for off, (_, sz, _) in merged.items())\n" +
+        "        elif existing:\n" +
+        "            total = existing.getLength()\n" +
+        "        else:\n" +
+        "            total = 1\n" +
+        "        st2 = StructureDataType(cat, name, total, dtm)\n" +
+        "        for off, (fname, sz, comment) in sorted(merged.items()):\n" +
+        "            dt = size_to_dt.get(sz, ByteDataType.dataType)\n" +
+        "            try: st2.insertAtOffset(off, dt, sz, fname, comment)\n" +
+        "            except: pass\n" +
+        "        tx = currentProgram.startTransaction('define_struct: ' + name)\n" +
+        "        try:\n" +
+        "            result = dtm.addDataType(st2, DataTypeConflictHandler.REPLACE_HANDLER)\n" +
+        "            currentProgram.endTransaction(tx, True)\n" +
+        "            return result\n" +
+        "        except Exception as e:\n" +
+        "            currentProgram.endTransaction(tx, False)\n" +
+        "            return 'error: ' + str(e)\n" +
+        "\n" +
+        "    def scan_vtables(self, prog=None):\n" +
+        "        '''Scan RTTI in .rdata and return {vtable_static_addr: class_name}.\n" +
+        "        Uses native Memory.findBytes — fast. Results are cached after first call.\n" +
+        "        Equivalent to scanning for all MSVC class vtables in a PE binary.'''\n" +
+        "        if self._vtable_cache: return self._vtable_cache\n" +
+        "        import re as _re, struct as _st\n" +
+        "        import ghidra.util.task.TaskMonitor as _TM\n" +
+        "        p   = prog or currentProgram\n" +
+        "        mem = p.getMemory()\n" +
+        "        ds  = p.getAddressFactory().getDefaultAddressSpace()\n" +
+        "        rm  = p.getReferenceManager()\n" +
+        "        sb  = p.getImageBase().getOffset()\n" +
+        "        def r32(a):\n" +
+        "            try:\n" +
+        "                addr = ds.getAddress(a); b = bytearray(4)\n" +
+        "                for i in range(4): b[i] = mem.getByte(addr.add(i)) & 0xff\n" +
+        "                return _st.unpack('<I', bytes(b))[0]\n" +
+        "            except: return None\n" +
+        "        def rstr(a):\n" +
+        "            try:\n" +
+        "                addr = ds.getAddress(a); s = []\n" +
+        "                for i in range(128):\n" +
+        "                    c = mem.getByte(addr.add(i)) & 0xff\n" +
+        "                    if c == 0: break\n" +
+        "                    s.append(chr(c))\n" +
+        "                return ''.join(s)\n" +
+        "            except: return ''\n" +
+        "        rdata = next((b for b in mem.getBlocks() if b.getName() == '.rdata'), None)\n" +
+        "        if not rdata: return {}\n" +
+        "        cols = {}\n" +
+        "        search = rdata.getStart()\n" +
+        "        end    = rdata.getEnd()\n" +
+        "        while True:\n" +
+        "            hit = mem.findBytes(search, bytes([1,0,0,0]), None, True, _TM.DUMMY)\n" +
+        "            if hit is None or hit.compareTo(end) >= 0: break\n" +
+        "            a = hit.getOffset()\n" +
+        "            self_rva = r32(a + 20)\n" +
+        "            if self_rva and sb + self_rva == a:\n" +
+        "                td_rva = r32(a + 12)\n" +
+        "                if td_rva:\n" +
+        "                    name = rstr(sb + td_rva + 16)\n" +
+        "                    if name.startswith('.?'):\n" +
+        "                        m = _re.match(r'\\.\\?A[VUW]([^@]+)@', name)\n" +
+        "                        cols[a] = m.group(1) if m else name\n" +
+        "            search = ds.getAddress(a + 4)\n" +
+        "        vtmap = {}\n" +
+        "        for col_addr, class_name in cols.items():\n" +
+        "            col_ghidra = ds.getAddress(col_addr)\n" +
+        "            for ref in rm.getReferencesTo(col_ghidra):\n" +
+        "                vtmap[ref.getFromAddress().getOffset() + 8] = class_name\n" +
+        "        self._vtable_cache = vtmap\n" +
+        "        return vtmap\n" +
+        "\n" +
+        "    def rename_vfuncs(self, vtable_map=None, dry_run=False):\n" +
+        "        '''Bulk-rename FUN_* functions using vtable map from scan_vtables().\n" +
+        "        Assigns Class::vfunc_N names. Skips already-named functions.\n" +
+        "        Returns {renamed: N, skipped: N, errors: N}.'''\n" +
+        "        import re as _re\n" +
+        "        from ghidra.program.model.symbol import SourceType\n" +
+        "        vtmap = vtable_map or self.scan_vtables()\n" +
+        "        p  = currentProgram\n" +
+        "        mem = p.getMemory()\n" +
+        "        ds  = p.getAddressFactory().getDefaultAddressSpace()\n" +
+        "        fm  = p.getFunctionManager()\n" +
+        "        st2 = p.getSymbolTable()\n" +
+        "        def r64(a):\n" +
+        "            try:\n" +
+        "                addr = ds.getAddress(a); b = bytearray(8)\n" +
+        "                for i in range(8): b[i] = mem.getByte(addr.add(i)) & 0xff\n" +
+        "                import struct as _s; return _s.unpack('<Q', bytes(b))[0]\n" +
+        "            except: return None\n" +
+        "        renamed = skipped = errors = 0\n" +
+        "        tx = p.startTransaction('reng.rename_vfuncs') if not dry_run else None\n" +
+        "        try:\n" +
+        "            for vt, class_name in vtmap.items():\n" +
+        "                ns_name = _re.sub(r'[<>$,\\s]', '_', class_name)[:64]\n" +
+        "                try:\n" +
+        "                    ns = st2.getNamespace(ns_name, p.getGlobalNamespace())\n" +
+        "                    if ns is None and not dry_run:\n" +
+        "                        ns = st2.createNameSpace(p.getGlobalNamespace(), ns_name, SourceType.ANALYSIS)\n" +
+        "                except: skipped += 1; continue\n" +
+        "                idx = 0\n" +
+        "                ptr = vt\n" +
+        "                while idx < 512:\n" +
+        "                    fn_addr = r64(ptr)\n" +
+        "                    if not fn_addr: break\n" +
+        "                    sb = p.getImageBase().getOffset()\n" +
+        "                    if fn_addr < sb or fn_addr > sb + 0x10000000: break\n" +
+        "                    fn = fm.getFunctionAt(ds.getAddress(fn_addr))\n" +
+        "                    if fn is None: break\n" +
+        "                    cur = fn.getName()\n" +
+        "                    if cur.startswith('FUN_') or cur.startswith('thunk_FUN_'):\n" +
+        "                        if not dry_run:\n" +
+        "                            try: fn.setName('vfunc_%d' % idx, SourceType.ANALYSIS); fn.setParentNamespace(ns); renamed += 1\n" +
+        "                            except: errors += 1\n" +
+        "                        else: renamed += 1\n" +
+        "                    else:\n" +
+        "                        skipped += 1\n" +
+        "                        if not dry_run:\n" +
+        "                            try:\n" +
+        "                                if fn.getParentNamespace().isGlobal(): fn.setParentNamespace(ns)\n" +
+        "                            except: pass\n" +
+        "                    ptr += 8; idx += 1\n" +
+        "            if tx is not None: p.endTransaction(tx, True)\n" +
+        "        except Exception as e:\n" +
+        "            if tx is not None: p.endTransaction(tx, False)\n" +
+        "            return {'error': str(e)}\n" +
+        "        return {'renamed': renamed, 'skipped': skipped, 'errors': errors}\n" +
+        "\n" +
+        "reng = REngHelpers()\n\n";
 
     @Override
     public boolean isReadOnly() {
@@ -545,7 +918,32 @@ public class EvalPythonTool implements McpTool {
             "               dbg.delete_breakpoints(addr) → ok/error\n" +
             "  Stack:       dbg.get_stack(thread=None, snap=None) → [{level, pc}]\n" +
             "  Services:    dbg.get_trace() / dbg.get_trace_manager() / dbg.get_target_service() / dbg.get_bp_service()\n" +
-            "  Workflow: call dbg.status() first; if connected=False use `debugger` tool to diagnose the session.";
+            "  Workflow: call dbg.status() first; if connected=False use `debugger` tool to diagnose the session.\n\n" +
+            "Reverse Engineering Prelude Active (call via 'reng.method') — works with or without live debugger:\n" +
+            "  Address conv:  reng.image_base() → runtime base inferred from debugger thread names\n" +
+            "                 reng.to_rt(static_addr) / reng.to_static(rt_addr) → ASLR conversion\n" +
+            "  RTTI:          reng.rtti(rt_obj_ptr) → MSVC x64 class name (reads vtable[-8]→COL→TypeDescriptor)\n" +
+            "  Struct explorer (ReClass.NET-style):\n" +
+            "                 reng.explore(rt_addr, size=256) → field table: offset/hex/ptr-type/int/float/note\n" +
+            "                   Auto-identifies vtable, fn-ptrs, sub-object RTTI, nulls, small ints, floats\n" +
+            "                 reng.read_struct(rt_addr, {'health':(0x54,'f32'), 'pos_x':(0xD0,'f32')}) → {name:val}\n" +
+            "                   types: u8/u16/u32/u64/i8/i16/i32/i64/f32/f64/ptr/cstr/wstr\n" +
+            "  Struct authoring:\n" +
+            "                 reng.define_struct('Actor', {'formID':(0x18,4,'FormID'), 'pos':(0xD0,4,'X pos')}) → DataType\n" +
+            "                   If struct exists: existing NAMED fields are preserved, new fields merged in\n" +
+            "                   Call with fields={} to inspect current definition\n" +
+            "  RTTI/vtable scanner (static, fast):\n" +
+            "                 reng.scan_vtables() → {vtable_static_addr: class_name} — scans .rdata for all MSVC vtables\n" +
+            "                 reng.rename_vfuncs() → renames FUN_* into ClassName::vfunc_N namespaces\n" +
+            "                   dry_run=True to preview count without modifying\n" +
+            "  Standard RE workflows:\n" +
+            "    1. Identify live object type:  reng.rtti(rt_ptr) → 'PlayerCharacter'\n" +
+            "    2. Explore its layout:         reng.explore(rt_ptr) → field table with auto-interpretation\n" +
+            "    3. Read known fields:          reng.read_struct(rt_ptr, known_offsets)\n" +
+            "    4. Record discoveries:         reng.define_struct('PlayerCharacter', {'health':(0x54,4,'f32')})\n" +
+            "    5. Bulk rename vtable fns:     reng.rename_vfuncs(reng.scan_vtables())\n" +
+            "    6. Resolve virtual calls:      breakpoint on indirect call, read RCX, reng.rtti(RCX) → class,\n" +
+            "                                   vtable offset / 8 = vfunc index → exact function identified";
     }
 
     @Override
