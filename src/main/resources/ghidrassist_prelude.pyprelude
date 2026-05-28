@@ -541,6 +541,9 @@ class DebuggerHelpers:
     def delete_breakpoints(self, addr):
         '''Delete all logical breakpoints at addr (STATIC Ghidra address).
         Accepts int, hex string with or without 0x prefix, or decimal — same as set_breakpoint.
+        Also removes Ghidra BreakpointMarker bookmarks at the same address to avoid
+        the INCONSISTENT_ENABLED ghost entry that appears in list_breakpoints when
+        only the trace-side gets deleted.
         Returns {ok, address: '0x...', deleted: N, message}.'''
         try:
             svc = self.get_bp_service()
@@ -552,7 +555,23 @@ class DebuggerHelpers:
                         'message': 'no breakpoints at ' + hex_str}
             futures = [bp.delete() for bp in bps]
             for f in futures: f.get()
-            return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': ''}
+            # Also clear program-side breakpoint bookmarks (they cause the
+            # INCONSISTENT_ENABLED ghost row to persist in list_breakpoints)
+            try:
+                bm_mgr = currentProgram.getBookmarkManager()
+                tx = currentProgram.startTransaction('delete_breakpoints bookmarks')
+                try:
+                    for bm in bm_mgr.getBookmarks(prog_addr):
+                        if 'reakpoint' in str(bm.getType()) or 'reakpoint' in str(bm.getCategory()):
+                            bm_mgr.removeBookmark(bm)
+                    currentProgram.endTransaction(tx, True)
+                except Exception:
+                    currentProgram.endTransaction(tx, False)
+            except Exception: pass
+            # Verify nothing left at this address
+            remaining = list(svc.getBreakpointsAt(currentProgram, prog_addr))
+            msg = '' if not remaining else 'warning: %d logical breakpoint(s) still listed at this address' % len(remaining)
+            return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': msg}
         except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
     def get_stack(self, thread=None, snap=None):
         '''Stack frames for the current (or given) thread as list of {level, pc} dicts.
