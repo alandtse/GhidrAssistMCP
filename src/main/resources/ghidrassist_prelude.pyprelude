@@ -464,9 +464,16 @@ class REngHelpers:
                     rt_fn  = rt_pc - offset
                     # Find the static function address from the display name
                     full = name
+                    # FUN_ pattern (SkyrimSE style)
                     fn_m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))' % _re.escape(prog_name), full, _re.I)
                     if fn_m:
                         static_fn = int(fn_m.group(2), 16)
+                        self._image_base_cache = rt_fn - (static_fn - static_base)
+                        return self._image_base_cache
+                    # thunk_StartAddress_0_XXXXXXXX pattern (SkyrimVR style)
+                    thunk_m = _re.search(r'%s!thunk_\w+_(1[0-9a-fA-F]+)' % _re.escape(prog_name), full, _re.I)
+                    if thunk_m:
+                        static_fn = int(thunk_m.group(1), 16)
                         self._image_base_cache = rt_fn - (static_fn - static_base)
                         return self._image_base_cache
         except Exception as e: pass
@@ -1206,6 +1213,85 @@ class REngHelpers:
                             'size': dt.getLength() if dt else 0})
             prev = class_name
         return results
+
+    # Prefixes that indicate a field is provisional/unidentified (safe to overwrite by default)
+    PROVISIONAL_PREFIXES = ('unk', 'pad', 'gap', 'field_', '_pad', '_unk', 'byte_', 'dword_', 'qword_')
+
+    def is_provisional(self, field_name):
+        '''Return True if a field name looks unidentified (safe to overwrite without force=True).
+        Override reng.PROVISIONAL_PREFIXES to customize for your project's naming conventions.'''
+        if not field_name: return True
+        name_lower = field_name.lower()
+        return any(name_lower.startswith(p) for p in self.PROVISIONAL_PREFIXES)
+
+    def patch_struct(self, name, fields, force=False):
+        '''Update specific fields in an existing struct — the "fix existing RE" tool.
+        Designed for partially RE'd projects: provisional fields (unk*, pad*, gap*, field_*)
+        are updated by default. Established field names require force=True to overwrite.
+        fields = {field_name: (offset, size, comment)}
+        force=False: overwrite provisional names freely, protect established names
+        force=True:  overwrite anything at that offset (for correcting wrong established names)
+        Customize provisional prefix detection via reng.PROVISIONAL_PREFIXES.
+        Returns summary of changes made.'''
+        from ghidra.program.model.data import (StructureDataType, CategoryPath,
+            DataTypeConflictHandler, ByteDataType, WordDataType, DWordDataType, QWordDataType)
+        dtm = currentProgram.getDataTypeManager()
+        dt = self._find_dt(name)
+        if dt is None:
+            return 'Struct not found: %s. Use define_struct() to create it.' % name
+        size_to_dt = {1: ByteDataType.dataType, 2: WordDataType.dataType,
+                      4: DWordDataType.dataType, 8: QWordDataType.dataType}
+        changes = []
+        tx = currentProgram.startTransaction('patch_struct: ' + name)
+        try:
+            for fname, (off, sz, comment) in sorted(fields.items(), key=lambda x: x[1][0]):
+                existing_comp = dt.getComponentAt(off)
+                existing_name = existing_comp.getFieldName() if existing_comp else None
+                # Allow overwriting provisional fields; protect established names unless force=True
+                if existing_name and not force and not self.is_provisional(existing_name):
+                    changes.append('SKIPPED +0x%x: %s — %r is established (use force=True to overwrite)'
+                                   % (off, fname, existing_name))
+                    continue
+                # Clear the range and insert new field
+                try:
+                    dt.clearComponent(dt.getComponentAt(off)) if existing_comp else None
+                    dt_type = size_to_dt.get(sz, ByteDataType.dataType)
+                    dt.insertAtOffset(off, dt_type, sz, fname, comment)
+                    changes.append('UPDATED +0x%x: %s (%d bytes) [was: %s]'
+                                   % (off, fname, sz, existing_name or 'empty'))
+                except Exception as e:
+                    changes.append('ERROR +0x%x %s: %s' % (off, fname, e))
+            dtm.addDataType(dt, DataTypeConflictHandler.REPLACE_HANDLER)
+            currentProgram.endTransaction(tx, True)
+        except Exception as e:
+            currentProgram.endTransaction(tx, False)
+            return 'Transaction failed: ' + str(e)
+        return '\n'.join(changes) if changes else 'No changes made'
+
+    def rename_function(self, static_addr, new_name, namespace=None):
+        '''Rename a function at a static address. Safe for fixing PDB-derived names.
+        namespace: optional class name to place it in (e.g. "PlayerCharacter")
+        Returns ok/error string.'''
+        from ghidra.program.model.symbol import SourceType
+        ds  = currentProgram.getAddressFactory().getDefaultAddressSpace()
+        fm  = currentProgram.getFunctionManager()
+        st2 = currentProgram.getSymbolTable()
+        fn  = fm.getFunctionAt(ds.getAddress(static_addr))
+        if not fn: return 'No function at 0x%x' % static_addr
+        tx = currentProgram.startTransaction('rename_function')
+        try:
+            old_name = fn.getName(True)
+            fn.setName(new_name, SourceType.USER_DEFINED)
+            if namespace:
+                ns = st2.getNamespace(namespace, currentProgram.getGlobalNamespace())
+                if ns is None:
+                    ns = st2.createNameSpace(currentProgram.getGlobalNamespace(), namespace, SourceType.USER_DEFINED)
+                fn.setParentNamespace(ns)
+            currentProgram.endTransaction(tx, True)
+            return 'Renamed: %s → %s::%s' % (old_name, namespace or 'global', new_name)
+        except Exception as e:
+            currentProgram.endTransaction(tx, False)
+            return 'Error: ' + str(e)
 
     def apply_struct(self, static_or_rt_addr, struct_name, is_runtime=False):
         '''Apply a Ghidra DataType to an address in the Listing view.
