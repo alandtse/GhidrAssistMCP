@@ -309,19 +309,43 @@ class DebuggerHelpers:
             target.readRegisters(platform, thread, frame, regs)
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
+    def _resolve_live_addr(self, addr):
+        '''Accept a static (Ghidra) or live (runtime) address and return a live int.
+        Logic: parse to int. If the value falls inside currentProgram's static image
+        range, translate to runtime via reng.image_base(). Otherwise treat as live.
+        This lets read_memory / refresh_memory / write_memory accept either.'''
+        if isinstance(addr, int):
+            addr_int = addr
+        else:
+            s = str(addr).strip().lower()
+            addr_int = int(s, 16) if s.startswith('0x') else int(s, 16)
+        if currentProgram:
+            sb = currentProgram.getImageBase().getOffset()
+            size = currentProgram.getMemory().getSize() if hasattr(currentProgram.getMemory(), 'getSize') else 0x10000000
+            if sb <= addr_int < sb + size:
+                # Looks like a static address — translate to live via the trace module base
+                trace = self.get_trace()
+                snap = self.get_snap()
+                if trace is not None:
+                    prog_name = currentProgram.getName()
+                    for m in trace.getModuleManager().getAllModules():
+                        if str(m.getName(snap)).lower().endswith(prog_name.lower()):
+                            return addr_int - sb + m.getBase(snap).getOffset()
+        return addr_int
+
     def read_memory(self, addr, length, snap=None):
-        '''Read `length` bytes at `addr` (hex str or int) from trace memory. Returns hex string.
-        IMPORTANT: addr is a LIVE process address, not a Ghidra static address.
-        Live ≠ static because of ASLR. To convert a Ghidra static address (0x140xxxxxxx)
-        to live: live = reng.to_rt(static), or use reng.image_base() to compute manually.
-        Call dbg.list_modules() to see all module base addresses.
-        For up-to-date bytes on a live target call refresh_memory(addr, length) first.'''
+        '''Read `length` bytes at `addr` from trace memory. Returns hex string.
+        Accepts EITHER a live runtime address OR a Ghidra static address — translated
+        automatically when the value falls inside currentProgram's static image range.
+        If you see all zeros for a known-mapped region, the page is "cold" — call
+        dbg.refresh_memory(addr, length) first to fetch from the live target.'''
         try:
             trace = self.get_trace()
             if snap is None: snap = self.get_snap()
             if not trace or snap < 0: return 'no active trace'
+            live_addr = self._resolve_live_addr(addr)
             af = trace.getBaseAddressFactory()
-            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            a = af.getDefaultAddressSpace().getAddress(live_addr)
             import java.nio.ByteBuffer as ByteBuffer
             buf = ByteBuffer.allocate(length)
             read = trace.getMemoryManager().getBytes(snap, a, buf)
@@ -330,13 +354,15 @@ class DebuggerHelpers:
             return ''.join('%02x' % (b & 0xff) for b in ba[:read])
         except Exception as e: return 'error: ' + str(e)
     def refresh_memory(self, addr, length):
-        '''Ask the live target to read memory into the trace (requires live session).'''
+        '''Ask the live target to read memory into the trace (requires live session).
+        Accepts either a live or static address — translated automatically.'''
         try:
             trace = self.get_trace()
             target = self.get_target_service().getTarget(trace)
             if not target: return 'no target'
+            live_addr = self._resolve_live_addr(addr)
             af = trace.getBaseAddressFactory()
-            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            a = af.getDefaultAddressSpace().getAddress(live_addr)
             import ghidra.program.model.address.AddressSet as AddressSet
             aset = AddressSet(a, a.add(length - 1))
             target.readMemory(aset, monitor)
@@ -609,12 +635,14 @@ class DebuggerHelpers:
         except Exception as e: return 'error: ' + str(e)
     def write_memory(self, addr, hex_bytes):
         '''Write bytes (hex string) to live target memory via StateEditor.
+        Accepts either a live or static address — translated automatically.
         Requires RW control mode.'''
         try:
             trace = self.get_trace()
             if not trace: return 'no active trace'
+            live_addr = self._resolve_live_addr(addr)
             af = trace.getBaseAddressFactory()
-            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            a = af.getDefaultAddressSpace().getAddress(live_addr)
             raw = bytes(int(hex_bytes[i:i+2], 16) for i in range(0, len(hex_bytes), 2))
             ctrl_svc = self._svc('ghidra.app.services.DebuggerControlService')
             tm = self.get_trace_manager()

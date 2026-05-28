@@ -92,12 +92,11 @@ public class EvalPythonTool implements McpTool {
             "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static), RTTI (rtti/class_hierarchy/vtable_methods), " +
             "ReClass-style struct exploration (explore/follow/tree/diff/as_known/as_array), authoring " +
             "(define_class/define_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
-            "CRITICAL — ASLR address spaces:\n" +
-            "  dbg.read_memory/write_memory/refresh_memory take LIVE runtime addresses.\n" +
-            "  dbg.set_breakpoint/delete_breakpoints take STATIC Ghidra addresses (auto-mapped).\n" +
-            "  Convert: live = reng.to_rt(static); static = reng.to_static(live).\n" +
-            "  dbg.read_memory returning all zeros usually means cold page not captured — " +
-            "call dbg.refresh_memory(live_addr, len) first.\n\n" +
+            "Address handling: dbg.* memory + breakpoint methods accept EITHER a static\n" +
+            "Ghidra address (0x14xxxxxxx in currentProgram's image range) OR a live runtime\n" +
+            "address — translated automatically. Use reng.to_rt/to_static for explicit conversion.\n" +
+            "dbg.read_memory returning all zeros usually means cold page not yet captured —\n" +
+            "call dbg.refresh_memory(addr, len) first.\n\n" +
             "Companion MCP tools: `debugger` (session status), `scripts` (Script Manager), `project` (open programs).";
     }
 
