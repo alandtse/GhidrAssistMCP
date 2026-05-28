@@ -288,7 +288,7 @@ class DebuggerHelpers:
                     ctx = DefaultActionContext()
             else:
                 ctx = DefaultActionContext()
-            policy = Target.ObjectArgumentPolicy.CURRENT_OBJECT_IF_APPLICABLE
+            policy = Target.ObjectArgumentPolicy.CURRENT_AND_RELATED
             actions = target.collectActions(name, ctx, policy)
             if not actions:
                 return 'action ' + action_name_field + ' not available (wrong state?)'
