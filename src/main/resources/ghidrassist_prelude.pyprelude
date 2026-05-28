@@ -341,8 +341,9 @@ class DebuggerHelpers:
             from ghidra.trace.model.breakpoint import TraceBreakpointKind
             svc = self.get_bp_service()
             if not svc: return 'DebuggerLogicalBreakpointService not loaded'
+            import java.util.Set as _JSet
             prog_addr = currentProgram.getAddressFactory().getAddress(str(addr))
-            kinds = java.util.Set.of(TraceBreakpointKind.SW_EXECUTE)
+            kinds = _JSet.of(TraceBreakpointKind.SW_EXECUTE)
             future = svc.placeBreakpointAt(currentProgram, prog_addr, length, kinds, name)
             future.get()
             return 'ok: breakpoint at ' + str(addr)
