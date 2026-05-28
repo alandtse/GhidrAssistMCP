@@ -94,7 +94,11 @@ public class EvalPythonTool implements McpTool {
             "- find_struct(name): Get Struct DT object\n" +
             "- read_bytes(addr, length): Hex memory read\n" +
             "- VT: VTSession and VTMatchInfo are auto-imported\n" +
-            "Context provided: currentProgram, currentAddress, monitor.\n\n" +
+            "Context provided: currentProgram, currentAddress, monitor.\n" +
+            "Symbol search tips:\n" +
+            "- For a known name: currentProgram.getSymbolTable().getSymbols('exactName')\n" +
+            "- For all symbols of one type: getDefinedSymbols() (NOT getSymbolIterator — that one is unbounded and may stall)\n" +
+            "- For functions: currentProgram.getFunctionManager().getFunctions(True) (sorted iterator)\n\n" +
             "Debugger Prelude Active (call via 'dbg.method') — requires Debugger plugin + active session:\n" +
             "  Session:     dbg.status() → {connected, trace, snap, thread, has_live_target, control_mode}\n" +
             "  ⚠ ASLR: live process addresses ≠ Ghidra static addresses. ALL dbg.*_memory and\n" +
