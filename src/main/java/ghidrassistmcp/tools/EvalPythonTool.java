@@ -849,6 +849,246 @@ public class EvalPythonTool implements McpTool {
         "            return {'error': str(e)}\n" +
         "        return {'renamed': renamed, 'skipped': skipped, 'errors': errors}\n" +
         "\n" +
+        "    def follow(self, rt_addr, offset, size=256):\n" +
+        "        '''Follow a pointer at [rt_addr+offset] and explore the pointed-to object.\n" +
+        "        Core ReClass.NET workflow: see a candidate ptr in explore(), follow it here.\n" +
+        "        Returns explore() output for the sub-object, or error string.'''\n" +
+        "        import struct as _st\n" +
+        "        b = self._read_rt(rt_addr + offset, 8)\n" +
+        "        if not b: return 'Error: could not read ptr at 0x%x+0x%x' % (rt_addr, offset)\n" +
+        "        sub_ptr = _st.unpack_from('<Q', b)[0]\n" +
+        "        if sub_ptr == 0: return 'Null pointer at offset 0x%x' % offset\n" +
+        "        print('Following ptr @ +0x%x: 0x%x -> 0x%x' % (offset, rt_addr + offset, sub_ptr))\n" +
+        "        return self.explore(sub_ptr, size)\n" +
+        "\n" +
+        "    def as_array(self, rt_addr, offset, count, type_str='f32'):\n" +
+        "        '''Read `count` consecutive values of `type_str` starting at rt_addr+offset.\n" +
+        "        Useful for: XYZ positions (3xf32), rotation matrices (9xf32), arrays of IDs (Nxu32).\n" +
+        "        type_str: f32/f64/u8/u16/u32/u64/i32/i64/ptr\n" +
+        "        Example: reng.as_array(actor_ptr, 0xD0, 3, \"f32\") → [x, y, z]'''\n" +
+        "        import struct as _st\n" +
+        "        fmt_map = {'f32':('<f',4),'f64':('<d',8),'u8':('<B',1),'u16':('<H',2),\n" +
+        "                   'u32':('<I',4),'u64':('<Q',8),'i32':('<i',4),'i64':('<q',8),'ptr':('<Q',8)}\n" +
+        "        if type_str not in fmt_map: return 'Unknown type: ' + type_str\n" +
+        "        fmt, sz = fmt_map[type_str]\n" +
+        "        total = count * sz\n" +
+        "        raw = self._read_rt(rt_addr + offset, total)\n" +
+        "        if not raw: return 'Error reading %d bytes at 0x%x+0x%x' % (total, rt_addr, offset)\n" +
+        "        result = [_st.unpack_from(fmt, raw, i*sz)[0] for i in range(count)]\n" +
+        "        return result\n" +
+        "\n" +
+        "    def diff(self, rt_addr1, rt_addr2, size=256, threshold=0):\n" +
+        "        '''Compare two struct instances field-by-field to find which offsets differ.\n" +
+        "        Key ReClass.NET technique: find two objects of the same class (e.g. two Actors),\n" +
+        "        change one (take damage, move), diff them → differing offsets = health/position/etc.\n" +
+        "        Returns list of {offset, val1, val2, delta} for differing 8-byte slots.'''\n" +
+        "        import struct as _st\n" +
+        "        dbg.refresh_memory(rt_addr1, size)\n" +
+        "        dbg.refresh_memory(rt_addr2, size)\n" +
+        "        raw1 = self._read_rt(rt_addr1, size)\n" +
+        "        raw2 = self._read_rt(rt_addr2, size)\n" +
+        "        if not raw1 or not raw2: return 'Error reading memory'\n" +
+        "        diffs = []\n" +
+        "        n = min(len(raw1), len(raw2))\n" +
+        "        for off in range(0, n - 7, 8):\n" +
+        "            v1 = _st.unpack_from('<Q', raw1, off)[0]\n" +
+        "            v2 = _st.unpack_from('<Q', raw2, off)[0]\n" +
+        "            if v1 != v2:\n" +
+        "                delta = abs(v2 - v1) if v2 >= v1 else abs(v1 - v2)\n" +
+        "                if delta > threshold:\n" +
+        "                    f1 = _st.unpack_from('<f', raw1, off)[0]\n" +
+        "                    f2 = _st.unpack_from('<f', raw2, off)[0]\n" +
+        "                    diffs.append({'offset': off, 'hex_off': '+0x%x' % off,\n" +
+        "                                  'val1': v1, 'val2': v2, 'delta': delta,\n" +
+        "                                  'as_f32_1': f1, 'as_f32_2': f2})\n" +
+        "        print('Diff 0x%x vs 0x%x: %d differing slots out of %d' % (rt_addr1, rt_addr2, len(diffs), n//8))\n" +
+        "        return diffs\n" +
+        "\n" +
+        "    def class_hierarchy(self, rt_ptr):\n" +
+        "        '''Decode full MSVC RTTI inheritance chain for a live object.\n" +
+        "        Returns ordered list of {class, offset, bases} from most-derived to base.\n" +
+        "        NOTE: RTTI stores class NAMES and BASE OFFSETS, not vfunc names.\n" +
+        "        Use vtable_methods() to see the actual virtual functions by slot.'''\n" +
+        "        import struct as _st\n" +
+        "        try:\n" +
+        "            b = self._read_rt(rt_ptr, 8)\n" +
+        "            if not b: return [{'error': 'cannot read object'}]\n" +
+        "            vtable_rt = _st.unpack_from('<Q', b)[0]\n" +
+        "            b2 = self._read_rt(vtable_rt - 8, 8)\n" +
+        "            if not b2: return [{'error': 'cannot read vtable[-8]'}]\n" +
+        "            col_rt = _st.unpack_from('<Q', b2)[0]\n" +
+        "            col_static = self.to_static(col_rt)\n" +
+        "            if not col_static: return [{'error': 'address conversion failed'}]\n" +
+        "            col_bytes = self._read_mem_static(col_static, 24)\n" +
+        "            if not col_bytes or col_bytes[0] != 1: return [{'error': 'invalid COL'}]\n" +
+        "            sb = currentProgram.getImageBase().getOffset()\n" +
+        "            # RTTIClassHierarchyDescriptor RVA is at COL+16\n" +
+        "            chd_rva  = _st.unpack_from('<I', col_bytes, 16)[0]\n" +
+        "            chd_static = sb + chd_rva\n" +
+        "            chd_bytes  = self._read_mem_static(chd_static, 12)\n" +
+        "            if not chd_bytes: return [{'error': 'cannot read CHD'}]\n" +
+        "            num_bases  = _st.unpack_from('<I', chd_bytes, 8)[0]\n" +
+        "            bca_rva    = _st.unpack_from('<I', chd_bytes, 4)[0]  # wait, offset 4 is attrs, 8 is numBases\n" +
+        "            # CHD layout: +0=sig, +4=attrs, +8=numBases, +12=pBaseClassArray(RVA)\n" +
+        "            chd_bytes12 = self._read_mem_static(chd_static, 16)\n" +
+        "            num_bases   = _st.unpack_from('<I', chd_bytes12, 8)[0]\n" +
+        "            bca_rva     = _st.unpack_from('<I', chd_bytes12, 12)[0]\n" +
+        "            bca_static  = sb + bca_rva\n" +
+        "            result = []\n" +
+        "            import re as _re\n" +
+        "            for i in range(min(num_bases, 64)):\n" +
+        "                bcd_rva   = self._read_mem_static(bca_static + i * 4, 4)\n" +
+        "                if not bcd_rva: break\n" +
+        "                bcd_static = sb + _st.unpack_from('<I', bcd_rva)[0]\n" +
+        "                bcd_bytes  = self._read_mem_static(bcd_static, 28)\n" +
+        "                if not bcd_bytes: break\n" +
+        "                td_rva  = _st.unpack_from('<I', bcd_bytes, 0)[0]\n" +
+        "                mdisp   = _st.unpack_from('<i', bcd_bytes, 8)[0]   # offset within object\n" +
+        "                name_bytes = self._read_mem_static(sb + td_rva + 16, 128)\n" +
+        "                if not name_bytes: continue\n" +
+        "                raw_name = name_bytes.split(b'\\x00')[0].decode('ascii', errors='replace')\n" +
+        "                m = _re.match(r'\\.\\?A[VUW]([^@]+)@', raw_name)\n" +
+        "                class_name = m.group(1) if m else raw_name\n" +
+        "                result.append({'class': class_name, 'offset': mdisp, 'index': i})\n" +
+        "            return result\n" +
+        "        except Exception as e: return [{'error': str(e)}]\n" +
+        "\n" +
+        "    def vtable_methods(self, rt_ptr, max_vfuncs=128):\n" +
+        "        '''List virtual functions in the vtable of a live object.\n" +
+        "        Shows slot index, runtime addr, static addr, and current Ghidra name.\n" +
+        "        NOTE: RTTI gives class/hierarchy names only. Vfunc NAMES come from:\n" +
+        "          - Ghidra analysis / prior renaming (e.g. from reng.rename_vfuncs())\n" +
+        "          - SKSE/CommonLibSSE header imports applied to the project\n" +
+        "          - Manual identification via dynamic tracing\n" +
+        "        Returns list of {slot, rt_addr, static_addr, name, named} dicts.'''\n" +
+        "        import struct as _st\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0\n" +
+        "        fm = currentProgram.getFunctionManager() if currentProgram else None\n" +
+        "        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None\n" +
+        "        try:\n" +
+        "            b = self._read_rt(rt_ptr, 8)\n" +
+        "            vtable_rt = _st.unpack_from('<Q', b)[0]\n" +
+        "            rtti_name = self.rtti(rt_ptr)\n" +
+        "            print('vtable @ 0x%x  class=%s' % (vtable_rt, rtti_name or '?'))\n" +
+        "            result = []\n" +
+        "            for i in range(max_vfuncs):\n" +
+        "                fn_bytes = self._read_rt(vtable_rt + i * 8, 8)\n" +
+        "                if not fn_bytes: break\n" +
+        "                fn_rt = _st.unpack_from('<Q', fn_bytes)[0]\n" +
+        "                if ib and not (ib <= fn_rt < ib + 0x10000000): break\n" +
+        "                fn_static = fn_rt - ib + sb if ib else fn_rt\n" +
+        "                name = '???'\n" +
+        "                named = False\n" +
+        "                if fm and ds:\n" +
+        "                    try:\n" +
+        "                        fn = fm.getFunctionAt(ds.getAddress(fn_static))\n" +
+        "                        if fn:\n" +
+        "                            name = fn.getName(True)  # include namespace\n" +
+        "                            named = not fn.getName().startswith('FUN_')\n" +
+        "                    except: pass\n" +
+        "                result.append({'slot': i, 'rt': hex(fn_rt), 'static': hex(fn_static),\n" +
+        "                               'name': name, 'named': named})\n" +
+        "            named_count = sum(1 for r in result if r['named'])\n" +
+        "            print('%d vfuncs, %d named, %d unnamed' % (len(result), named_count, len(result)-named_count))\n" +
+        "            return result\n" +
+        "        except Exception as e: return [{'error': str(e)}]\n" +
+        "\n" +
+        "    def _scripts_dir(self):\n" +
+        "        '''Return the primary user Ghidra scripts directory path.'''\n" +
+        "        try:\n" +
+        "            from ghidra.app.script import GhidraScriptUtil\n" +
+        "            dirs = GhidraScriptUtil.getScriptSourceDirectories()\n" +
+        "            if dirs: return str(dirs[0])\n" +
+        "        except: pass\n" +
+        "        import os\n" +
+        "        return os.path.join(os.path.expanduser('~'), 'ghidra_scripts')\n" +
+        "\n" +
+        "    def save_script(self, name, code, category='MCP', description=''):\n" +
+        "        '''Save a Python script to the Ghidra scripts directory so it appears in Script Manager.\n" +
+        "        name: filename without path (e.g. \"FindActors.py\")\n" +
+        "        code: the Python script content\n" +
+        "        category: Script Manager category (default \"MCP\")\n" +
+        "        description: short description shown in Script Manager\n" +
+        "        Scripts must be runnable as GhidraScripts — use currentProgram, monitor, etc.\n" +
+        "        Prepends @category/@description metadata if not already present.\n" +
+        "        Returns the full path written.'''\n" +
+        "        import os\n" +
+        "        scripts_dir = self._scripts_dir()\n" +
+        "        if not os.path.isdir(scripts_dir):\n" +
+        "            os.makedirs(scripts_dir, exist_ok=True)\n" +
+        "        # Prepend script metadata if not present\n" +
+        "        header = ''\n" +
+        "        if '@category' not in code:\n" +
+        "            header += '# @category %s\\n' % category\n" +
+        "        if description and '@description' not in code:\n" +
+        "            header += '# @description %s\\n' % description\n" +
+        "        if not name.endswith('.py'): name += '.py'\n" +
+        "        full_path = os.path.join(scripts_dir, name)\n" +
+        "        with open(full_path, 'w', encoding='utf-8') as f:\n" +
+        "            f.write(header + code)\n" +
+        "        print('Script saved: %s' % full_path)\n" +
+        "        print('Reload scripts in Ghidra: Script Manager > Refresh (green arrow)')\n" +
+        "        return full_path\n" +
+        "\n" +
+        "    def load_script(self, name):\n" +
+        "        '''Read and return the content of a script from the scripts directory.\n" +
+        "        Use to review or edit-then-save existing scripts.'''\n" +
+        "        import os\n" +
+        "        if not name.endswith('.py'): name += '.py'\n" +
+        "        path = os.path.join(self._scripts_dir(), name)\n" +
+        "        if not os.path.exists(path): return 'Script not found: %s' % path\n" +
+        "        with open(path, 'r', encoding='utf-8') as f: return f.read()\n" +
+        "\n" +
+        "    def list_scripts(self, pattern=None):\n" +
+        "        '''List scripts in the Ghidra scripts directory.\n" +
+        "        pattern: optional substring filter on filename.\n" +
+        "        Returns list of {name, path, category, description} dicts.'''\n" +
+        "        import os, re as _re\n" +
+        "        scripts_dir = self._scripts_dir()\n" +
+        "        result = []\n" +
+        "        if not os.path.isdir(scripts_dir): return []\n" +
+        "        for fname in sorted(os.listdir(scripts_dir)):\n" +
+        "            if not fname.endswith('.py'): continue\n" +
+        "            if pattern and pattern.lower() not in fname.lower(): continue\n" +
+        "            fpath = os.path.join(scripts_dir, fname)\n" +
+        "            cat = desc = ''\n" +
+        "            try:\n" +
+        "                with open(fpath, 'r', encoding='utf-8', errors='replace') as f:\n" +
+        "                    for line in f:\n" +
+        "                        if not line.startswith('#'): break\n" +
+        "                        m = _re.match(r'#\\s*@category\\s+(.*)', line)\n" +
+        "                        if m: cat = m.group(1).strip()\n" +
+        "                        m = _re.match(r'#\\s*@description\\s+(.*)', line)\n" +
+        "                        if m: desc = m.group(1).strip()\n" +
+        "            except: pass\n" +
+        "            result.append({'name': fname, 'path': fpath, 'category': cat, 'description': desc})\n" +
+        "        return result\n" +
+        "\n" +
+        "    def run_script(self, name):\n" +
+        "        '''Execute an existing script from the scripts directory in the current Ghidra context.\n" +
+        "        Equivalent to running it from Script Manager but called from MCP.\n" +
+        "        Output is captured and returned.'''\n" +
+        "        import os, io\n" +
+        "        from ghidra.app.script import GhidraScriptUtil\n" +
+        "        from generic.jar import ResourceFile\n" +
+        "        from ghidra.app.script import GhidraState\n" +
+        "        from ghidra.app.script import ScriptControls\n" +
+        "        from ghidra.util.task import TaskMonitor\n" +
+        "        if not name.endswith('.py'): name += '.py'\n" +
+        "        path = os.path.join(self._scripts_dir(), name)\n" +
+        "        if not os.path.exists(path): return 'Script not found: %s' % path\n" +
+        "        resource = ResourceFile(java.io.File(path))\n" +
+        "        provider = GhidraScriptUtil.getProvider(resource)\n" +
+        "        if not provider: return 'No script provider for: %s' % name\n" +
+        "        import java.io.PrintWriter as PrintWriter\n" +
+        "        import java.io.StringWriter as StringWriter\n" +
+        "        sw = StringWriter()\n" +
+        "        pw = PrintWriter(sw)\n" +
+        "        script_instance = provider.getScriptInstance(resource, pw)\n" +
+        "        script_instance.execute(state, ScriptControls(pw, pw, TaskMonitor.DUMMY))\n" +
+        "        return sw.toString() or 'Script ran with no output'\n" +
+        "\n" +
         "reng = REngHelpers()\n\n";
 
     @Override
@@ -937,13 +1177,38 @@ public class EvalPythonTool implements McpTool {
             "                 reng.rename_vfuncs() → renames FUN_* into ClassName::vfunc_N namespaces\n" +
             "                   dry_run=True to preview count without modifying\n" +
             "  Standard RE workflows:\n" +
-            "    1. Identify live object type:  reng.rtti(rt_ptr) → 'PlayerCharacter'\n" +
-            "    2. Explore its layout:         reng.explore(rt_ptr) → field table with auto-interpretation\n" +
-            "    3. Read known fields:          reng.read_struct(rt_ptr, known_offsets)\n" +
-            "    4. Record discoveries:         reng.define_struct('PlayerCharacter', {'health':(0x54,4,'f32')})\n" +
-            "    5. Bulk rename vtable fns:     reng.rename_vfuncs(reng.scan_vtables())\n" +
-            "    6. Resolve virtual calls:      breakpoint on indirect call, read RCX, reng.rtti(RCX) → class,\n" +
-            "                                   vtable offset / 8 = vfunc index → exact function identified";
+            "  ReClass.NET struct experimentation workflow:\n" +
+            "    1. Identify:    reng.rtti(rt_ptr) → 'PlayerCharacter'\n" +
+            "    2. Explore:     reng.explore(rt_ptr) → auto-interpreted field table\n" +
+            "    3. Drill down:  reng.follow(rt_ptr, 0x20) → explore sub-object at ptr offset 0x20\n" +
+            "    4. Re-interp:   reng.as_array(rt_ptr, 0xD0, 3, 'f32') → [x, y, z] floats at offset\n" +
+            "    5. Diff:        reng.diff(ptr_a, ptr_b) → fields that differ between two instances\n" +
+            "                     KEY: find two Actors, damage one, diff → health/stamina offsets revealed\n" +
+            "    6. Record:      reng.define_struct('Actor', {'health':(0x54,4,'hp f32'), 'pos_x':(0xD0,4,'X')})\n" +
+            "                     Existing named fields are PRESERVED; new fields are merged in\n" +
+            "    7. Inspect existing: reng.define_struct('Actor', {}) → show current definition\n" +
+            "  RTTI vs vfunc names (important distinction):\n" +
+            "    - RTTI stores: class NAME and full INHERITANCE CHAIN (not vfunc names)\n" +
+            "    - reng.class_hierarchy(rt_ptr) → [{class, offset, index}] ordered base→derived\n" +
+            "    - reng.vtable_methods(rt_ptr) → [{slot, rt, static, name, named}] — function addresses\n" +
+            "      'name' comes from Ghidra analysis. Already-named fns show their real name.\n" +
+            "      Unnamed FUN_* slots → use dbg.set_breakpoint + observe to identify them.\n" +
+            "    - To get names: import SKSE/CommonLibSSE headers into Ghidra, then vtable_methods()\n" +
+            "      shows propagated names; reng.rename_vfuncs() assigns ClassName::vfunc_N for rest\n" +
+            "  Bulk operations:\n" +
+            "    5. Bulk rename: reng.rename_vfuncs(reng.scan_vtables())\n" +
+            "    6. Resolve virt calls: breakpoint on `call [rax+N]`, read RCX → reng.rtti(RCX),\n" +
+            "                           slot = N/8, reng.vtable_methods(RCX)[slot] → exact function\n" +
+            "  Script management (generate persistent RE tools for Ghidra Script Manager):\n" +
+            "    reng.save_script('FindActors.py', code, category='MCP', description='...')\n" +
+            "      Writes to ~/ghidra_scripts/. Prepends @category/@description metadata.\n" +
+            "      Script appears in Ghidra Script Manager after Refresh (green arrow).\n" +
+            "      Scripts must use GhidraScript globals: currentProgram, monitor, state, etc.\n" +
+            "    reng.list_scripts(pattern=None) → [{name, path, category, description}]\n" +
+            "    reng.load_script('name.py')     → script source for review/editing\n" +
+            "    reng.run_script('name.py')      → execute existing script, capture output\n" +
+            "    Workflow: prototype logic in eval_python, save working code with save_script,\n" +
+            "      result is a reusable Ghidra tool for future RE sessions.";
     }
 
     @Override
