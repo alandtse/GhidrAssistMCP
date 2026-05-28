@@ -597,58 +597,106 @@ public class EvalPythonTool implements McpTool {
         "            return m.group(1) if m else name\n" +
         "        except: return None\n" +
         "\n" +
+        "    def _load_ghidra_struct(self, class_name):\n" +
+        "        '''Look up class_name in Ghidra's DataTypeManager. Returns {offset: (fname, size)} or {}.'''\n" +
+        "        if not class_name or not currentProgram: return {}\n" +
+        "        dtm = currentProgram.getDataTypeManager()\n" +
+        "        for dt in dtm.getAllDataTypes():\n" +
+        "            if dt.getName() == class_name and hasattr(dt, 'getComponents'):\n" +
+        "                result = {}\n" +
+        "                for comp in dt.getComponents():\n" +
+        "                    fname = comp.getFieldName()\n" +
+        "                    if fname:\n" +
+        "                        result[comp.getOffset()] = (fname, comp.getLength(), comp.getComment() or '')\n" +
+        "                return result\n" +
+        "        return {}\n" +
+        "\n" +
         "    def explore(self, rt_addr, size=256):\n" +
-        "        '''ReClass.NET-style live struct explorer.\n" +
-        "        Reads `size` bytes at runtime address, interprets each 8-byte slot as:\n" +
-        "          ptr (→ RTTI class if SkyrimSE range), i64, f32, f64.\n" +
-        "        Auto-identifies vtable slot (offset 0), function pointers, null fields.\n" +
-        "        Returns formatted string table. Use to discover struct layout interactively.'''\n" +
+        "        '''ReClass.NET-style live struct explorer — backed by Ghidra's DataTypeManager.\n" +
+        "        If Ghidra already has a struct defined for this class (via reng.define_struct or\n" +
+        "        imported headers), known field names are shown at their offsets automatically.\n" +
+        "        Unknown offsets show raw type inference (ptr/RTTI/f32/int).\n" +
+        "        Pointer fields show RTTI class name of the pointed-to object.\n" +
+        "        Returns formatted table. Use follow()/tree() to drill into sub-objects.'''\n" +
         "        import struct as _st\n" +
         "        ib = self.image_base()\n" +
         "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0\n" +
         "        fm = currentProgram.getFunctionManager() if currentProgram else None\n" +
         "        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None\n" +
-        "        # Fetch memory\n" +
         "        dbg.refresh_memory(rt_addr, size)\n" +
         "        raw = self._read_rt(rt_addr, size)\n" +
         "        if not raw: return 'Error: could not read 0x%x' % rt_addr\n" +
         "        rtti_name = self.rtti(rt_addr)\n" +
-        "        lines = ['=== 0x%x  (%s)  %d bytes ===' % (rt_addr, rtti_name or '?', len(raw)),\n" +
-        "                 '%-6s %-16s %-22s %-12s %-12s  %s' % ('Off','Hex(LE)','As ptr','As i32/i64','As f32','Note')]\n" +
-        "        for off in range(0, len(raw) - 7, 8):\n" +
+        "        # Look up existing Ghidra struct definition for this class\n" +
+        "        known_fields = self._load_ghidra_struct(rtti_name)\n" +
+        "        has_known = len(known_fields) > 0\n" +
+        "        header_note = ' [%d known fields from Ghidra DTM]' % len(known_fields) if has_known else ' [no struct defined yet — use reng.define_struct to record discoveries]'\n" +
+        "        lines = ['=== 0x%x  (%s)  %d bytes%s ===' % (rt_addr, rtti_name or '?', len(raw), header_note),\n" +
+        "                 '%-6s %-16s %-22s %-18s  %s' % ('Off','Hex(LE)','Field/Ptr','Value','Note')]\n" +
+        "        # Track which offsets are covered by known fields to skip their bytes\n" +
+        "        covered = set()\n" +
+        "        for off, (fname, sz, comment) in sorted(known_fields.items()):\n" +
+        "            for i in range(sz): covered.add(off + i)\n" +
+        "        off = 0\n" +
+        "        while off < len(raw) - 3:\n" +
+        "            # Check if this offset has a known field definition\n" +
+        "            if off in known_fields:\n" +
+        "                fname, sz, comment = known_fields[off]\n" +
+        "                chunk = raw[off:off+min(sz,8)]\n" +
+        "                import struct as _st2\n" +
+        "                val_str = ''\n" +
+        "                if sz == 4: val_str = 'i32=%d / f32=%.4g' % (_st2.unpack_from('<i',chunk)[0], _st2.unpack_from('<f',chunk)[0])\n" +
+        "                elif sz == 8: val_str = 'u64=0x%x' % _st2.unpack_from('<Q',chunk)[0]\n" +
+        "                elif sz == 1: val_str = 'u8=%d' % chunk[0]\n" +
+        "                elif sz == 2: val_str = 'u16=%d' % _st2.unpack_from('<H',chunk)[0]\n" +
+        "                else: val_str = chunk.hex()[:16]\n" +
+        "                lines.append('+%-5x %-16s %-22s %-18s  KNOWN: %s%s' % (\n" +
+        "                    off, chunk.hex()[:16], fname, val_str, comment, ' (sz=%d)'%sz if sz!=8 else ''))\n" +
+        "                off += sz\n" +
+        "                continue\n" +
+        "            # Unknown field — infer type for 8-byte slot\n" +
+        "            if off + 8 > len(raw): break\n" +
         "            chunk = raw[off:off+8]\n" +
         "            u64   = _st.unpack_from('<Q', chunk)[0]\n" +
         "            i32   = _st.unpack_from('<i', chunk[:4])[0]\n" +
         "            f32   = _st.unpack_from('<f', chunk[:4])[0]\n" +
         "            note  = ''\n" +
-        "            ptr_str = ''\n" +
+        "            field_str = ''\n" +
+        "            val_str   = ''\n" +
         "            if u64 == 0:\n" +
         "                note = 'null'\n" +
+        "                val_str = '0'\n" +
         "            elif ib and ib <= u64 < ib + 0x10000000:\n" +
         "                static = u64 - ib + sb\n" +
         "                try:\n" +
         "                    fn = fm.getFunctionAt(ds.getAddress(static)) if fm else None\n" +
         "                    if fn:\n" +
-        "                        ptr_str = fn.getName(True)\n" +
+        "                        field_str = fn.getName(True)[:22]\n" +
         "                        note = 'fn-ptr'\n" +
+        "                    elif off == 0:\n" +
+        "                        note = 'vtable → %s' % (rtti_name or '?')\n" +
         "                    else:\n" +
-        "                        # Could be vtable or object ptr\n" +
-        "                        if off == 0:\n" +
-        "                            note = 'vtable → %s' % (rtti_name or '?')\n" +
-        "                        else:\n" +
-        "                            sub_rtti = self.rtti(u64)\n" +
-        "                            ptr_str = '0x%x' % u64\n" +
-        "                            note = 'ptr→%s' % (sub_rtti if sub_rtti else 'SkyrimSE')\n" +
-        "                except: ptr_str = '0x%x' % u64\n" +
+        "                        sub_rtti = self.rtti(u64)\n" +
+        "                        field_str = ('(%s*)' % sub_rtti if sub_rtti else 'ptr')[:22]\n" +
+        "                        note = 'ptr→%s*' % (sub_rtti or 'SkyrimSE')\n" +
+        "                        sub_known = self._load_ghidra_struct(sub_rtti)\n" +
+        "                        if sub_known: note += ' [%d known fields]' % len(sub_known)\n" +
+        "                except: field_str = ('0x%x'%u64)[:22]\n" +
+        "                val_str = '0x%x' % u64\n" +
         "            elif 0x7f0000000000 <= u64 <= 0x7fffffffffff:\n" +
-        "                ptr_str = '0x%x' % u64\n" +
+        "                val_str = '0x%x' % u64\n" +
         "                note = 'ptr→DLL/heap'\n" +
         "            elif 0 < u64 < 0x10000:\n" +
         "                note = 'small_int=%d' % u64\n" +
-        "            elif abs(f32) > 1e-10 and abs(f32) < 1e8 and f32 == f32:  # not NaN, reasonable range\n" +
+        "                val_str = str(u64)\n" +
+        "            elif abs(f32) > 1e-10 and abs(f32) < 1e8 and f32 == f32:\n" +
         "                note = 'f32≈%.5g' % f32\n" +
-        "            lines.append('+%-5x %-16s %-22s %-12d %-12.5g  %s' % (\n" +
-        "                off, chunk.hex()[:16], ptr_str[:22], i32, f32, note))\n" +
+        "                val_str = '%.5g' % f32\n" +
+        "            else:\n" +
+        "                val_str = 'i32=%d' % i32\n" +
+        "            lines.append('+%-5x %-16s %-22s %-18s  %s' % (\n" +
+        "                off, chunk.hex()[:16], field_str[:22], val_str[:18], note))\n" +
+        "            off += 8\n" +
         "        return '\\n'.join(lines)\n" +
         "\n" +
         "    def read_struct(self, rt_addr, fields):\n" +
@@ -1089,6 +1137,158 @@ public class EvalPythonTool implements McpTool {
         "        script_instance.execute(state, ScriptControls(pw, pw, TaskMonitor.DUMMY))\n" +
         "        return sw.toString() or 'Script ran with no output'\n" +
         "\n" +
+        "    def apply_struct(self, static_or_rt_addr, struct_name, is_runtime=False):\n" +
+        "        '''Apply a Ghidra DataType to an address in the Listing view.\n" +
+        "        This is the write-back step: once you have defined a struct with define_struct(),\n" +
+        "        call apply_struct() to see it rendered with field names in the Ghidra listing/decompiler.\n" +
+        "        static_or_rt_addr: static Ghidra address (or runtime addr if is_runtime=True)\n" +
+        "        struct_name: name of a struct already in Ghidra DataTypeManager\n" +
+        "        is_runtime: if True, converts runtime addr to static first using reng.to_static()\n" +
+        "        Returns ok/error string.'''\n" +
+        "        from ghidra.program.model.data import DataUtilities\n" +
+        "        from ghidra.program.model.data import DataUtilities as DU\n" +
+        "        addr_int = self.to_static(static_or_rt_addr) if is_runtime else static_or_rt_addr\n" +
+        "        if addr_int is None: return 'Error: address conversion failed'\n" +
+        "        dtm = currentProgram.getDataTypeManager()\n" +
+        "        dt = None\n" +
+        "        for d in dtm.getAllDataTypes():\n" +
+        "            if d.getName() == struct_name:\n" +
+        "                dt = d; break\n" +
+        "        if dt is None: return 'Struct not found in DTM: %s (use reng.define_struct first)' % struct_name\n" +
+        "        ds   = currentProgram.getAddressFactory().getDefaultAddressSpace()\n" +
+        "        addr = ds.getAddress(addr_int)\n" +
+        "        tx   = currentProgram.startTransaction('apply_struct: %s @ 0x%x' % (struct_name, addr_int))\n" +
+        "        try:\n" +
+        "            DataUtilities.createData(currentProgram, addr, dt, -1,\n" +
+        "                DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA)\n" +
+        "            currentProgram.endTransaction(tx, True)\n" +
+        "            return 'Applied %s at 0x%x — visible in Ghidra Listing view' % (struct_name, addr_int)\n" +
+        "        except Exception as e:\n" +
+        "            currentProgram.endTransaction(tx, False)\n" +
+        "            return 'Error: ' + str(e)\n" +
+        "\n" +
+        "    def as_known(self, rt_addr, offset, struct_name):\n" +
+        "        '''Read an inline (non-pointer) sub-struct embedded at rt_addr+offset.\n" +
+        "        Looks up struct_name in Ghidra's data type manager, reads that many bytes,\n" +
+        "        and returns field values using the existing type definition.\n" +
+        "        Example: reng.as_known(actor_ptr, 0xD0, \"NiPoint3\") → {x, y, z}\n" +
+        "        Complement to follow() which dereferences a pointer field.'''\n" +
+        "        import struct as _st\n" +
+        "        dtm = currentProgram.getDataTypeManager()\n" +
+        "        # Find the struct by name\n" +
+        "        dt = None\n" +
+        "        for d in dtm.getAllDataTypes():\n" +
+        "            if d.getName() == struct_name and hasattr(d, 'getComponents'):\n" +
+        "                dt = d; break\n" +
+        "        if dt is None:\n" +
+        "            return 'Struct not found in Ghidra type manager: %s (define with reng.define_struct first)' % struct_name\n" +
+        "        raw = self._read_rt(rt_addr + offset, dt.getLength())\n" +
+        "        if not raw: return 'Error reading %d bytes at 0x%x+0x%x' % (dt.getLength(), rt_addr, offset)\n" +
+        "        result = {}\n" +
+        "        for comp in dt.getComponents():\n" +
+        "            fname = comp.getFieldName() or ('field_%x' % comp.getOffset())\n" +
+        "            off2  = comp.getOffset()\n" +
+        "            sz    = comp.getLength()\n" +
+        "            chunk = raw[off2:off2+sz]\n" +
+        "            if sz == 4:   result[fname] = _st.unpack_from('<i', chunk)[0]\n" +
+        "            elif sz == 8: result[fname] = _st.unpack_from('<q', chunk)[0]\n" +
+        "            elif sz == 2: result[fname] = _st.unpack_from('<h', chunk)[0]\n" +
+        "            elif sz == 1: result[fname] = chunk[0]\n" +
+        "            else:         result[fname] = chunk.hex()\n" +
+        "        return result\n" +
+        "\n" +
+        "    def tree(self, rt_addr, depth=2, max_ptrs=8, size=128, _indent=0):\n" +
+        "        '''Recursive struct explorer — like ReClass.NET tree view.\n" +
+        "        Explores object at rt_addr, then follows pointer fields up to `depth` levels.\n" +
+        "        max_ptrs: max pointer fields to recurse into per level (to avoid explosion).\n" +
+        "        Returns formatted string tree. Example:\n" +
+        "          reng.tree(player_ptr, depth=2) → player fields, then sub-object fields.\n" +
+        "        NOTE: depth>2 on a large object can be slow; start with depth=1.'''\n" +
+        "        import struct as _st\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0\n" +
+        "        pad = '  ' * _indent\n" +
+        "        dbg.refresh_memory(rt_addr, size)\n" +
+        "        raw = self._read_rt(rt_addr, size)\n" +
+        "        rtti_name = self.rtti(rt_addr)\n" +
+        "        lines = ['%s[0x%x] %s' % (pad, rt_addr, rtti_name or '?')]\n" +
+        "        if not raw:\n" +
+        "            lines.append('%s  <could not read memory>' % pad)\n" +
+        "            return '\\n'.join(lines)\n" +
+        "        fm = currentProgram.getFunctionManager() if currentProgram else None\n" +
+        "        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None\n" +
+        "        ptr_fields = []  # collect for recursion\n" +
+        "        for off in range(0, len(raw) - 7, 8):\n" +
+        "            chunk = raw[off:off+8]\n" +
+        "            u64   = _st.unpack_from('<Q', chunk)[0]\n" +
+        "            f32   = _st.unpack_from('<f', chunk[:4])[0]\n" +
+        "            i32   = _st.unpack_from('<i', chunk[:4])[0]\n" +
+        "            note  = ''\n" +
+        "            if u64 == 0:\n" +
+        "                note = 'null'\n" +
+        "            elif ib and ib <= u64 < ib + 0x10000000:\n" +
+        "                static = u64 - ib + sb\n" +
+        "                try:\n" +
+        "                    fn = fm.getFunctionAt(ds.getAddress(static)) if fm else None\n" +
+        "                    if fn: note = 'fn→%s' % fn.getName(True)\n" +
+        "                    else:\n" +
+        "                        sub_rtti = self.rtti(u64) if off > 0 else rtti_name\n" +
+        "                        note = 'ptr→%s' % (sub_rtti or 'SkyrimSE')\n" +
+        "                        if off > 0 and depth > 0 and len(ptr_fields) < max_ptrs:\n" +
+        "                            ptr_fields.append((off, u64, sub_rtti))\n" +
+        "                except: note = 'ptr→SkyrimSE'\n" +
+        "            elif 0x7f0000000000 <= u64 <= 0x7fffffffffff:\n" +
+        "                note = 'ptr→DLL/heap'\n" +
+        "            elif 0 < u64 <= 0xffff: note = 'int=%d' % u64\n" +
+        "            elif abs(f32) < 1e8 and abs(f32) > 1e-10 and f32 == f32:\n" +
+        "                note = 'f32≈%.4g' % f32\n" +
+        "            # Check if offset is in a known Ghidra struct\n" +
+        "            known = ''\n" +
+        "            if rtti_name:\n" +
+        "                ns = currentProgram.getSymbolTable().getNamespace(rtti_name, currentProgram.getGlobalNamespace()) if currentProgram else None\n" +
+        "                # Could look up offset in known struct here\n" +
+        "            if note != 'null' or off < 32:\n" +
+        "                lines.append('%s  +0x%-4x  %s  %s' % (pad, off, chunk[:4].hex(), note))\n" +
+        "        # Recurse into pointer fields\n" +
+        "        if depth > 0 and ptr_fields:\n" +
+        "            lines.append('%s  --- sub-objects ---' % pad)\n" +
+        "            for off, ptr, sub_rtti in ptr_fields:\n" +
+        "                lines.append('%s  [+0x%x → 0x%x  %s]:' % (pad, off, ptr, sub_rtti or '?'))\n" +
+        "                sub = self.tree(ptr, depth=depth-1, max_ptrs=max_ptrs, size=size, _indent=_indent+2)\n" +
+        "                lines.append(sub)\n" +
+        "        return '\\n'.join(lines)\n" +
+        "\n" +
+        "    def find_type_at(self, rt_addr, offset, size=8):\n" +
+        "        '''Cross-reference what Ghidra knows about a field at a given offset.\n" +
+        "        Checks: is the value a fn ptr? a known vtable? does it match any Ghidra struct field?\n" +
+        "        Returns a description string. Use to understand a specific offset without full explore().'''\n" +
+        "        import struct as _st\n" +
+        "        ib = self.image_base()\n" +
+        "        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0\n" +
+        "        raw = self._read_rt(rt_addr + offset, 8)\n" +
+        "        if not raw: return 'Cannot read memory at 0x%x+0x%x' % (rt_addr, offset)\n" +
+        "        u64 = _st.unpack_from('<Q', raw)[0]\n" +
+        "        f32 = _st.unpack_from('<f', raw[:4])[0]\n" +
+        "        i32 = _st.unpack_from('<i', raw[:4])[0]\n" +
+        "        result = ['Value @ 0x%x+0x%x: 0x%x' % (rt_addr, offset, u64),\n" +
+        "                  '  as i32: %d' % i32,\n" +
+        "                  '  as f32: %.6g' % f32]\n" +
+        "        if ib and ib <= u64 < ib + 0x10000000:\n" +
+        "            static = u64 - ib + sb\n" +
+        "            fm = currentProgram.getFunctionManager()\n" +
+        "            ds = currentProgram.getAddressFactory().getDefaultAddressSpace()\n" +
+        "            fn = fm.getFunctionAt(ds.getAddress(static))\n" +
+        "            if fn:\n" +
+        "                result.append('  → function: %s @ 0x%x' % (fn.getName(True), static))\n" +
+        "            else:\n" +
+        "                rtti = self.rtti(u64)\n" +
+        "                vtmap = self._vtable_cache or {}\n" +
+        "                cls = vtmap.get(static, rtti)\n" +
+        "                result.append('  → SkyrimSE ptr%s' % ((' → class: %s' % cls) if cls else ''))\n" +
+        "                if rtti: result.append('  → RTTI says: %s*' % rtti)\n" +
+        "        elif u64 == 0: result.append('  → null')\n" +
+        "        return '\\n'.join(result)\n" +
+        "\n" +
         "reng = REngHelpers()\n\n";
 
     @Override
@@ -1184,9 +1384,20 @@ public class EvalPythonTool implements McpTool {
             "    4. Re-interp:   reng.as_array(rt_ptr, 0xD0, 3, 'f32') → [x, y, z] floats at offset\n" +
             "    5. Diff:        reng.diff(ptr_a, ptr_b) → fields that differ between two instances\n" +
             "                     KEY: find two Actors, damage one, diff → health/stamina offsets revealed\n" +
-            "    6. Record:      reng.define_struct('Actor', {'health':(0x54,4,'hp f32'), 'pos_x':(0xD0,4,'X')})\n" +
+            "    6. Tree view:   reng.tree(ptr, depth=2) → recursive exploration (ptr fields → sub-objects)\n" +
+            "                     Shows full membership tree. max_ptrs limits width per level.\n" +
+            "    7. Inline struct: reng.as_known(ptr, 0xD0, 'NiPoint3') → read embedded struct by Ghidra type name\n" +
+            "                     For non-pointer members (inline); use follow() for pointer members\n" +
+            "    8. Field detail: reng.find_type_at(ptr, offset) → cross-reference one field\n" +
+            "    9. Record:      reng.define_struct('Actor', {'health':(0x54,4,'hp f32'), 'pos_x':(0xD0,4,'X')})\n" +
             "                     Existing named fields are PRESERVED; new fields are merged in\n" +
-            "    7. Inspect existing: reng.define_struct('Actor', {}) → show current definition\n" +
+            "   10. Inspect:     reng.define_struct('Actor', {}) → show current definition\n" +
+            "  Non-primitive member identification:\n" +
+            "    - explore() auto-RTTIs pointer fields → ptr→Actor*, ptr→TESObjectREFR*, etc.\n" +
+            "    - tree(depth=2) follows those pointers recursively\n" +
+            "    - as_known(ptr, off, 'NiPoint3') reads inline embedded structs defined in Ghidra\n" +
+            "    - as_array(ptr, off, N, 'f32') interprets N values (position, matrix, IDs)\n" +
+            "    - class_hierarchy(ptr) shows which base classes are embedded at which offsets\n" +
             "  RTTI vs vfunc names (important distinction):\n" +
             "    - RTTI stores: class NAME and full INHERITANCE CHAIN (not vfunc names)\n" +
             "    - reng.class_hierarchy(rt_ptr) → [{class, offset, index}] ordered base→derived\n" +
