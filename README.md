@@ -343,7 +343,8 @@ Equates associate symbolic names with constant integer values used in disassembl
 
 | Parameter | Description |
 | --------- | ----------- |
-| `script`  | Execute arbitrary Python 3 code in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or it falls back to Jython 2.7). The global variables `currentProgram`, `currentAddress`, and `monitor` are automatically accessible in your scripts. |
+| `script`  | Python 3 code to execute in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or falls back to Jython 2.7). Globals: `currentProgram`, `currentAddress`, `monitor`, `state`. |
+| `sync`    | Optional boolean. Default `false` (async — returns a `task_id`, poll with `get_task_status`). Pass `true` for inline result on quick scripts (under ~2s) to skip the task-id round-trip. |
 
 A `ghidra` helper object is pre-injected with common operations:
 
@@ -354,7 +355,9 @@ A `ghidra` helper object is pre-injected with common operations:
 | `ghidra.get_program(name)` | Return an open `Program` object by name |
 | `ghidra.get_refs_to(addr)` | List all callers of an address |
 | `ghidra.set_comment(addr, text, type)` | Set an EOL/PRE/POST/PLATE comment |
-| `ghidra.find_struct(name)` | Return a `Structure` data type object |
+| `ghidra.find_struct(name)` | Return a `Structure` data type object (warning: stringifying dumps the entire field table — use `struct_summary`/`struct_fields` for compact output) |
+| `ghidra.struct_summary(name)` | Compact summary: `{name, size, field_count, category}` |
+| `ghidra.struct_fields(name, prefix=None)` | Slim field list: `[(offset, name, type, size)]` (optional name-prefix filter) |
 | `ghidra.read_bytes(addr, length)` | Read memory as a hex string |
 | `ghidra.copy_datatype(name, from_prog, to_prog)` | Copy a struct/enum between open programs |
 | `ghidra.list_vt_sessions()` | List open Version Tracking sessions: `[{name, src, dst, match_count}]` |
