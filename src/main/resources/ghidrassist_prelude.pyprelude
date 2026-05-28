@@ -207,6 +207,32 @@ class DebuggerHelpers:
         trace = self.get_trace()
         if not trace: return []
         return list(trace.getThreadManager().getAllThreads())
+
+    def list_modules(self, name_filter=None):
+        '''Loaded modules with runtime base addresses — essential for ASLR conversion.
+        Live process addresses ≠ Ghidra static addresses. To convert a static address
+        (e.g. 0x140123456 in Ghidra) to a live process address for read_memory or
+        set_breakpoint, use the matching module's runtime base:
+            live_addr = static_addr - static_image_base + module.base
+        For the currentProgram, use reng.image_base() / reng.to_rt() / reng.to_static().
+        Returns list of {name, base, length, path} dicts. name_filter is a substring.'''
+        trace = self.get_trace()
+        if not trace: return []
+        snap = self.get_snap()
+        result = []
+        for m in trace.getModuleManager().getAllModules():
+            try:
+                name = str(m.getName(snap))
+                if name_filter and name_filter.lower() not in name.lower(): continue
+                base = m.getBase(snap)
+                result.append({
+                    'name':   name.split('\\')[-1].split('/')[-1],  # short name
+                    'base':   '0x%x' % base.getOffset(),
+                    'length': '0x%x' % m.getLength(snap),
+                    'path':   name,
+                })
+            except Exception: pass
+        return result
     def get_registers(self, thread=None, frame=0, snap=None):
         '''Register values as {name: int} dict.
         Reads from trace memory register space (no live refresh).
@@ -241,6 +267,10 @@ class DebuggerHelpers:
         except Exception as e: return 'error: ' + str(e)
     def read_memory(self, addr, length, snap=None):
         '''Read `length` bytes at `addr` (hex str or int) from trace memory. Returns hex string.
+        IMPORTANT: addr is a LIVE process address, not a Ghidra static address.
+        Live ≠ static because of ASLR. To convert a Ghidra static address (0x140xxxxxxx)
+        to live: live = reng.to_rt(static), or use reng.image_base() to compute manually.
+        Call dbg.list_modules() to see all module base addresses.
         For up-to-date bytes on a live target call refresh_memory(addr, length) first.'''
         try:
             trace = self.get_trace()

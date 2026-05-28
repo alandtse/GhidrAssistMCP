@@ -97,13 +97,18 @@ public class EvalPythonTool implements McpTool {
             "Context provided: currentProgram, currentAddress, monitor.\n\n" +
             "Debugger Prelude Active (call via 'dbg.method') — requires Debugger plugin + active session:\n" +
             "  Session:     dbg.status() → {connected, trace, snap, thread, has_live_target, control_mode}\n" +
+            "  ⚠ ASLR: live process addresses ≠ Ghidra static addresses. ALL dbg.*_memory and\n" +
+            "    dbg.set_breakpoint take LIVE addresses. Convert via reng.to_rt(static_addr).\n" +
+            "    dbg.list_modules() shows all module runtime base addresses.\n" +
             "  Threads:     dbg.get_threads() → [TraceThread, ...]  dbg.get_thread() / dbg.get_snap()\n" +
+            "  Modules:     dbg.list_modules(name_filter=None) → [{name, base, length, path}]\n" +
             "  Registers:   dbg.get_registers(thread, frame, snap) → {name: int}  dbg.refresh_registers()\n" +
             "               dbg.write_register(name, value)\n" +
-            "  Memory:      dbg.read_memory(addr, length, snap) → hex string  dbg.refresh_memory(addr, n)\n" +
-            "               dbg.write_memory(addr, hex_bytes)\n" +
+            "  Memory:      dbg.read_memory(live_addr, length, snap) → hex string  dbg.refresh_memory(live_addr, n)\n" +
+            "               dbg.write_memory(live_addr, hex_bytes)\n" +
             "  Execution:   dbg.resume() / dbg.interrupt() / dbg.step_into() / dbg.step_over() / dbg.step_out() / dbg.kill()\n" +
-            "  Breakpoints: dbg.list_breakpoints() / dbg.set_breakpoint(addr, length, name) / dbg.delete_breakpoints(addr)\n" +
+            "  Breakpoints: dbg.list_breakpoints() / dbg.set_breakpoint(static_addr, length, name) / dbg.delete_breakpoints(static_addr)\n" +
+            "               (set/delete take STATIC addresses; auto-mapped to live via DebuggerStaticMappingService)\n" +
             "  Stack:       dbg.get_stack(thread, snap) → [{level, pc}]\n" +
             "  Workflow: call dbg.status() first; if connected=False use `debugger` tool.\n\n" +
             "Reverse Engineering Prelude Active (call via 'reng.method') — works with or without live debugger:\n" +
