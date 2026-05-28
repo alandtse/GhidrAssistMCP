@@ -297,15 +297,31 @@ class DebuggerHelpers:
             return result
         except Exception as e: return {'error': str(e)}
     def refresh_registers(self, thread=None, frame=0, snap=None):
-        '''Ask the live target to refresh register state into the trace (requires live session).'''
+        '''Ask the live target to refresh register state into the trace (requires live session).
+        Uses the trace's host platform (the actual debugged target's platform).
+        Falls back to DebuggerTraceManagerService.getCurrentPlatform if available.'''
         try:
             if thread is None: thread = self.get_thread()
             trace = thread.getTrace()
             target = self.get_target_service().getTarget(trace)
             if not target: return 'no target'
-            platform = trace.getPlatformManager().getCurrentPlatform()
+            # Prefer the trace manager's current platform (respects user focus);
+            # fall back to the trace's host platform (always present for a live trace).
+            tm = self.get_trace_manager()
+            platform = None
+            if tm is not None:
+                try: platform = tm.getCurrentPlatform()
+                except Exception: pass
+            if platform is None:
+                platform = trace.getPlatformManager().getHostPlatform()
+            if platform is None: return 'no platform available for trace'
             if snap is None: snap = self.get_snap()
-            regs = set(trace.getBaseLanguage().getRegisters())
+            # JPype can't disambiguate readRegisters(... Set) vs (... AddressSetView)
+            # from a Python set, so explicitly construct a Java HashSet.
+            import java.util.HashSet as _JHashSet
+            regs = _JHashSet()
+            for r in trace.getBaseLanguage().getRegisters():
+                regs.add(r)
             target.readRegisters(platform, thread, frame, regs)
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
