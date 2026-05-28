@@ -461,6 +461,31 @@ class DebuggerHelpers:
                     'snap_count_after': time_mgr.getSnapshotCount()}
         except Exception as e: return {'error': str(e)}
 
+    def health(self):
+        '''Report long-session resource usage. Use to decide when to call cleanup().
+        Returns dict with snap_count, max_snap, thread_count, module_count,
+        breakpoint_count, mcp_task_count.'''
+        result = {}
+        try:
+            trace = self.get_trace()
+            if trace:
+                result['trace']        = trace.getName()
+                result['snap_count']   = trace.getTimeManager().getSnapshotCount()
+                result['max_snap']     = trace.getTimeManager().getMaxSnap()
+                result['thread_count'] = len(list(trace.getThreadManager().getAllThreads()))
+                result['module_count'] = len(list(trace.getModuleManager().getAllModules()))
+            else:
+                result['trace'] = None
+            bp_svc = self.get_bp_service()
+            if bp_svc:
+                result['breakpoint_count'] = len(list(bp_svc.getAllBreakpoints()))
+            for plugin in state.getTool().getManagedPlugins():
+                if 'GhidrAssistMCP' in plugin.getClass().getSimpleName():
+                    result['mcp_task_count'] = len(plugin.getBackend().getTaskManager().listTasks(None))
+                    break
+        except Exception as e: result['error'] = str(e)
+        return result
+
     def status(self):
         '''Summary dict of current debugger state. Check connected=True before other calls.'''
         try:
