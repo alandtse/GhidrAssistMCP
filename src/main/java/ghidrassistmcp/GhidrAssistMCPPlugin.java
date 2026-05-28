@@ -88,6 +88,11 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 		if (provider != null) {
 			provider.logSession("Plugin initialized" + (isServerOwner ? " (server owner)" : ""));
 		}
+
+		// Register immediately so tools work even before any program is opened
+		if (manager != null) {
+			manager.setActivePlugin(this);
+		}
 	}
 	
 	/**
@@ -107,6 +112,7 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 		// Notify manager that this tool is now active (focus tracking)
 		if (manager != null) {
 			manager.setActiveTool(tool);
+			manager.setActivePlugin(this);  // ensure tools work after program open
 		}
 
 		GhidrAssistMCPBackend backend = getBackend();

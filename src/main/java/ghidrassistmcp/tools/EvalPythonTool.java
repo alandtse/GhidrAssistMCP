@@ -43,9 +43,10 @@ public class EvalPythonTool implements McpTool {
     /** Load prelude from the bundled .py resource file (cached after first load). */
     private static String loadPrelude() {
         if (PRELUDE_CACHE != null) return PRELUDE_CACHE;
-        try (InputStream is = EvalPythonTool.class.getResourceAsStream("/ghidrassist_prelude.py")) {
+        // .pyprelude extension prevents Ghidra's script scanner / PyGhidra from executing it at startup
+        try (InputStream is = EvalPythonTool.class.getResourceAsStream("/ghidrassist_prelude.pyprelude")) {
             if (is == null) {
-                Msg.error(EvalPythonTool.class, "ghidrassist_prelude.py not found in JAR resources");
+                Msg.error(EvalPythonTool.class, "ghidrassist_prelude.pyprelude not found in JAR resources");
                 return "# prelude load failed\n";
             }
             PRELUDE_CACHE = new String(is.readAllBytes(), StandardCharsets.UTF_8);

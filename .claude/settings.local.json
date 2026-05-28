@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(javap:*)",
+      "Bash(xargs -I{} sh -c \"jar tf \"\"{}\"\" 2>/dev/null | grep -l \"\"EquateTable.class\"\" && echo \"\"{}:\"\"\")",
+      "Bash(which gradle:*)",
+      "Bash(cd:*)",
+      "Bash(wc -l src/main/java/ghidrassistmcp/tools/*.java)",
+      "Bash(./gradlew compileJava)",
+      "Bash(cmd /c \"gradlew.bat compileJava 2>&1\")",
+      "Bash(cmd /c \"gradlew.bat compileJava\")",
+      "Bash(cmd /c \"gradlew.bat compileJava > build_output.txt 2>&1\")",
+      "Bash(powershell -Command \"Set-Location 'E:\\\\Documents\\\\source\\\\repos\\\\GhidrAssistMCP'; & '.\\\\gradlew.bat' compileJava 2>&1 | Out-String\" 2>&1)",
+      "Bash(gradle --version)",
+      "Bash(GHIDRA_INSTALL_DIR=\"E:\\\\Documents\\\\ghidra_12.0.3_PUBLIC\" gradle distributeExtension)",
+      "Read(//e/Documents/ghidra_12.0.3_PUBLIC/Extensions/Ghidra/**)",
+      "Read(//e/Documents/ghidra_12.0.3_PUBLIC/Extensions/**)",
+      "Bash(GHIDRA_INSTALL_DIR=\"E:\\\\Documents\\\\ghidra_12.0.3_PUBLIC\" gradle installDevExtension)",
+      "Bash(tasklist)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(GHIDRA_INSTALL_DIR=\"E:\\\\Documents\\\\ghidra_12.0.3_PUBLIC\" gradle buildExtension)",
+      "Bash(GHIDRA_INSTALL_DIR=\"E:\\\\Documents\\\\ghidra_12.0.3_PUBLIC\" gradle clean buildExtension)",
+      "mcp__Ghidra__eval_python",
+      "mcp__Ghidra__list_binaries",
+      "mcp__Ghidra__list_tasks",
+      "mcp__Ghidra__get_task_status"
+    ]
+  }
+}
