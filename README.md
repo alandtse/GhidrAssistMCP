@@ -368,21 +368,28 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 | Helper | Description |
 | ------ | ----------- |
 | `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}` |
+| `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
+| `dbg.cleanup(keep_snaps=None)` | Delete old trace snapshots via `TraceSnapshot.delete()` to compact the `.DBTrace` file (keeps current snap by default) |
+| `dbg.detach()` | Clean target disconnect (interrupt → DETACH → close trace → close TraceRMI connection); keeps the debuggee process alive |
 | `dbg.get_threads()` | List all `TraceThread` objects in the active trace |
 | `dbg.get_thread()` / `dbg.get_snap()` | Current thread and snapshot index |
+| `dbg.list_modules(name_filter=None)` | Loaded modules with runtime base addresses: `[{name, base, length, path}]` — essential for ASLR conversion |
 | `dbg.get_registers(thread, frame, snap)` | Register values as `{name: int}` dict |
 | `dbg.refresh_registers()` | Force live register read from target into trace |
 | `dbg.write_register(name, value)` | Write a register value (requires RW control mode) |
-| `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string |
-| `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace |
-| `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory |
+| `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string; accepts EITHER static or live address (auto-translated) |
+| `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace; accepts either address space |
+| `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory; accepts either address space |
 | `dbg.resume()` / `dbg.interrupt()` | Resume or suspend the target |
 | `dbg.step_into()` / `dbg.step_over()` / `dbg.step_out()` | Single-step execution |
 | `dbg.kill()` | Kill the target process |
-| `dbg.list_breakpoints()` | All logical breakpoints: `[{address, state, kinds, length}]` |
-| `dbg.set_breakpoint(addr, length, name)` | Place a software-execute breakpoint |
-| `dbg.delete_breakpoints(addr)` | Remove all breakpoints at an address |
+| `dbg.list_breakpoints()` | All logical breakpoints: `[{address: '0x...', state, kinds, length, name}]` |
+| `dbg.set_breakpoint(addr, length, name)` | Place a software-execute breakpoint at a static Ghidra address; returns `{ok, address: '0x...', state, message}` with verification |
+| `dbg.delete_breakpoints(addr)` | Remove all breakpoints at an address (also clears program-side `BreakpointMarker` bookmarks); returns `{ok, address, deleted, message}` |
+| `dbg.ensure_static_mapping()` | Add (or update) the trace ↔ program static mapping required for breakpoints to resolve; called automatically by `set_breakpoint` |
 | `dbg.get_stack(thread, snap)` | Stack frames: `[{level, pc}]` |
+
+**Address spaces.** `dbg.set_breakpoint` / `delete_breakpoints` take static Ghidra addresses (auto-mapped to live via the trace). The memory methods (`read_memory`, `write_memory`, `refresh_memory`) accept *either* a static or a live address and translate automatically when the value falls in `currentProgram`'s image range. If `read_memory` returns all zeros for a known-mapped region, the page is "cold" — call `refresh_memory(addr, length)` first.
 
 #### `debugger` - Debugger Session Management
 
