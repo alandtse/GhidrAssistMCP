@@ -406,24 +406,42 @@ class DebuggerHelpers:
         except Exception: return False
 
     def set_breakpoint(self, addr, length=1, name=''):
-        '''Place a software-execute breakpoint at addr in the current program.
-        addr: static hex string or int. Returns ok/error string.
-        Auto-establishes static-to-trace mapping if needed for the breakpoint
-        to become effective (ENABLED rather than INEFFECTIVE_ENABLED).'''
+        '''Place a software-execute breakpoint at the given STATIC Ghidra address.
+        addr: int (e.g. 0x1406c2140) or hex string.
+        Returns a dict with the actual state after placement so the caller can
+        confirm success without a separate list_breakpoints() round-trip:
+            {ok: bool, address: '0x...', state: '...', message: '...'}
+        state values: ENABLED (live and armed), INEFFECTIVE_ENABLED (placed but
+        target's static mapping/control mode prevents it from firing), or absent
+        if the placement raised. Auto-establishes static-to-trace mapping.'''
         try:
             from ghidra.trace.model.breakpoint import TraceBreakpointKind
             svc = self.get_bp_service()
-            if not svc: return 'DebuggerLogicalBreakpointService not loaded'
+            if not svc:
+                return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
             import java.util.Set as _JSet
-            # Ensure mapping exists so breakpoint resolves to a runtime address
             if self.get_trace() is not None:
                 self.ensure_static_mapping()
-            prog_addr = currentProgram.getAddressFactory().getAddress(str(addr))
+            # Normalize address — accept int or hex string, always echo as 0x...
+            if isinstance(addr, int):
+                addr_int = addr
+            else:
+                addr_int = int(str(addr).replace('0x', '').replace('0X', ''), 16)
+            prog_addr = currentProgram.getAddressFactory().getAddress('0x%x' % addr_int)
             kinds = _JSet.of(TraceBreakpointKind.SW_EXECUTE)
             future = svc.placeBreakpointAt(currentProgram, prog_addr, length, kinds, name)
             future.get()
-            return 'ok: breakpoint at ' + str(addr)
-        except Exception as e: return 'error: ' + str(e)
+            # Verify placement by querying back
+            placed = list(svc.getBreakpointsAt(currentProgram, prog_addr))
+            if not placed:
+                return {'ok': False, 'address': '0x%x' % addr_int,
+                        'message': 'placeBreakpointAt returned but no logical breakpoint exists at this address — likely a stale mapping or unloaded module'}
+            bp = placed[0]
+            state = bp.computeState().name()
+            return {'ok': True, 'address': '0x%x' % addr_int, 'state': state,
+                    'message': 'INEFFECTIVE_ENABLED means placed but not yet armed (check control_mode and ensure_static_mapping)' if state == 'INEFFECTIVE_ENABLED' else ''}
+        except Exception as e:
+            return {'ok': False, 'message': 'error: ' + str(e)}
     def delete_breakpoints(self, addr):
         '''Delete all logical breakpoints at addr in the current program.'''
         try:
