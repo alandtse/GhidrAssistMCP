@@ -345,6 +345,56 @@ class DebuggerHelpers:
     def kill(self, thread=None):
         '''Kill the target process.'''
         return self._do_action('KILL', thread)
+
+    def detach(self):
+        '''Cleanly disconnect from the live target, leaving it running.
+        Correct order is critical: target must be INTERRUPTED before DETACH is allowed.
+        If you just close the TraceRMI connection on a running target, dbgeng kills
+        the debuggee instead of detaching. This helper does the right thing:
+          1. INTERRUPT (if target is running)
+          2. DETACH action (target keeps running, debugger releases it)
+          3. closeTrace + close TraceRMI connection (frees Ghidra resources)
+        Returns summary string.'''
+        from ghidra.debug.api.target import ActionName, Target
+        from ghidra.app.services import DebuggerTraceManagerService, TraceRmiService
+        from docking import DefaultActionContext
+        import time
+        steps = []
+        trace = self.get_trace()
+        if trace is None: return 'no active trace'
+        target = self.get_target_service().getTarget(trace)
+        if target is None: return 'no live target'
+        ctx = DefaultActionContext()
+        policy = Target.ObjectArgumentPolicy.CURRENT_AND_RELATED
+        # 1. Interrupt if running (so DETACH is allowed)
+        try:
+            for entry in target.collectActions(ActionName.INTERRUPT, ctx, policy).values():
+                entry.invokeAsync(False); break
+            time.sleep(0.5)
+            steps.append('interrupted')
+        except Exception as e: steps.append('interrupt-err: %s' % e)
+        # 2. DETACH action
+        try:
+            actions = target.collectActions(ActionName.DETACH, ctx, policy)
+            if actions:
+                for entry in actions.values():
+                    entry.invokeAsync(False); break
+                time.sleep(0.5)
+                steps.append('detached')
+            else:
+                steps.append('no detach action available')
+        except Exception as e: steps.append('detach-err: %s' % e)
+        # 3. Close trace + connection
+        try:
+            self._tool().getService(DebuggerTraceManagerService).closeTrace(trace)
+            steps.append('trace closed')
+        except Exception as e: steps.append('closeTrace-err: %s' % e)
+        try:
+            for c in list(self._tool().getService(TraceRmiService).getAllConnections()):
+                c.close()
+            steps.append('connection closed')
+        except Exception as e: steps.append('close-conn-err: %s' % e)
+        return ' → '.join(steps)
     def list_breakpoints(self):
         '''List all logical breakpoints as list of {address, state, kinds, length} dicts.'''
         try:
