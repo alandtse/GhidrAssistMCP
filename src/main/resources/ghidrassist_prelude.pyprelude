@@ -482,17 +482,23 @@ class DebuggerHelpers:
             if mod is None: return False
             mod_base   = mod.getBase(snap)
             mod_length = mod.getLength(snap)
-            # Dedup: skip if any existing static mapping covers this module base
-            # and points to a program whose name matches currentProgram.
+            # Dedup: only skip if an existing mapping covers this module base
+            # AND uses the SAME runtime base. If a stale mapping points to the
+            # same program but at a different ASLR base, delete it (the new attach
+            # has a different runtime base than the previous session) and re-add.
             try:
+                stale_entries = []
                 for entry in trace.getStaticMappingManager().getAllEntries():
                     entry_start = entry.getMinTraceAddress()
-                    entry_end   = entry.getMaxTraceAddress()
-                    if (entry_start.getOffset() <= mod_base.getOffset() <=
-                            entry_end.getOffset()):
-                        url = entry.getStaticProgramURL()
-                        if url and url.getPath().endswith(prog_name):
-                            return True  # already mapped, no-op
+                    url = entry.getStaticProgramURL()
+                    if not (url and url.getPath().endswith(prog_name)): continue
+                    if entry_start.getOffset() == mod_base.getOffset():
+                        return True  # exact same mapping, no-op
+                    # Same program, different base = stale mapping from previous attach
+                    stale_entries.append(entry)
+                for entry in stale_entries:
+                    try: entry.delete()
+                    except Exception: pass
             except Exception: pass
             trace_loc = DefaultTraceLocation(trace, None, Lifespan.nowOn(snap), mod_base)
             prog_loc  = ProgramLocation(currentProgram, currentProgram.getImageBase())
