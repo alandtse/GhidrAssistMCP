@@ -441,6 +441,26 @@ class DebuggerHelpers:
             editor.setVariable(a, ba).get()
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
+    def cleanup(self, keep_snaps=None):
+        '''Delete old trace snapshots to compact the .DBTrace file.
+        Uses Ghidra's TraceSnapshot.delete() — official API, not a workaround.
+        keep_snaps: collection of snap numbers to preserve (default: current snap only)
+        Returns {'deleted': N, 'kept': N, 'snap_count_after': N}.'''
+        try:
+            trace = self.get_trace()
+            if not trace: return {'error': 'no active trace'}
+            keep = set(keep_snaps) if keep_snaps else {self.get_snap()}
+            time_mgr = trace.getTimeManager()
+            snaps = list(time_mgr.getAllSnapshots())
+            deleted = 0
+            for snap in snaps:
+                if snap.getKey() not in keep:
+                    try: snap.delete(); deleted += 1
+                    except Exception: pass
+            return {'deleted': deleted, 'kept': len(snaps) - deleted,
+                    'snap_count_after': time_mgr.getSnapshotCount()}
+        except Exception as e: return {'error': str(e)}
+
     def status(self):
         '''Summary dict of current debugger state. Check connected=True before other calls.'''
         try:
