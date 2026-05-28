@@ -36,6 +36,7 @@ import ghidrassistmcp.tools.ClassTool;
 import ghidrassistmcp.tools.CommentsTool;
 import ghidrassistmcp.tools.CreateDataVarTool;
 import ghidrassistmcp.tools.CreateFunctionTool;
+import ghidrassistmcp.tools.DebuggerTool;
 import ghidrassistmcp.tools.DisassembleAtTool;
 import ghidrassistmcp.tools.EnumTool;
 import ghidrassistmcp.tools.EquateTool;
@@ -175,6 +176,9 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new EnumTool());
         registerTool(new EquateTool());
         registerTool(new EvalPythonTool());
+
+        // Register debugger session management tool
+        registerTool(new DebuggerTool());
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }

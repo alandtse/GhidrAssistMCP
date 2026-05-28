@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
-- **46 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **47 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (46 total)
+- **View all available tools** (47 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -155,7 +155,7 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 46 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 47 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -340,6 +340,43 @@ A `ghidra` helper object is pre-injected with common operations:
 | `ghidra.get_vt_matches(session, status)` | Return `[{src, dst, status, similarity, confidence}]`; filter by `ACCEPTED`/`REJECTED`/`AVAILABLE` |
 | `ghidra.find_addr_in_version(addr, session)` | Find the accepted destination address for a source address across binary versions |
 | `ghidra.accept_vt_match(src_addr, session)` | Accept the first available VT match for a source address |
+
+A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra Debugger. Requires the Debugger plugin to be loaded and an active TraceRMI session (call `dbg.status()` to check):
+
+| Helper | Description |
+| ------ | ----------- |
+| `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}` |
+| `dbg.get_threads()` | List all `TraceThread` objects in the active trace |
+| `dbg.get_thread()` / `dbg.get_snap()` | Current thread and snapshot index |
+| `dbg.get_registers(thread, frame, snap)` | Register values as `{name: int}` dict |
+| `dbg.refresh_registers()` | Force live register read from target into trace |
+| `dbg.write_register(name, value)` | Write a register value (requires RW control mode) |
+| `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string |
+| `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace |
+| `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory |
+| `dbg.resume()` / `dbg.interrupt()` | Resume or suspend the target |
+| `dbg.step_into()` / `dbg.step_over()` / `dbg.step_out()` | Single-step execution |
+| `dbg.kill()` | Kill the target process |
+| `dbg.list_breakpoints()` | All logical breakpoints: `[{address, state, kinds, length}]` |
+| `dbg.set_breakpoint(addr, length, name)` | Place a software-execute breakpoint |
+| `dbg.delete_breakpoints(addr)` | Remove all breakpoints at an address |
+| `dbg.get_stack(thread, snap)` | Stack frames: `[{level, pc}]` |
+
+#### `debugger` - Debugger Session Management
+
+Use before `eval_python` to confirm a session is active or diagnose connection issues.
+
+| Action | Description |
+| ------ | ----------- |
+| `status` | Current state: connected, active trace name, thread, snap |
+| `list_sessions` | All open traces and active TraceRMI connections |
+| `server_info` | TraceRMI TCP server address and whether it is listening |
+
+Typical dynamic analysis workflow:
+1. Connect a backend (GDB/LLDB/WinDbg via TraceRMI, or launch from Debugger menu)
+2. `debugger status` — confirm `connected: true`
+3. `eval_python` with `dbg.status()`, `dbg.get_registers()`, `dbg.set_breakpoint(addr)`
+4. `eval_python` with `dbg.resume()` then `dbg.get_registers()` to inspect state after hitting the breakpoint
 
 ### Search Tools
 
