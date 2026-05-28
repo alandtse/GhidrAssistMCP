@@ -27,6 +27,7 @@ public class McpTaskManager {
 
     private static final int DEFAULT_THREAD_POOL_SIZE = 4;
     private static final int TASK_RETENTION_HOURS = 1;
+    private static final int MAX_TERMINAL_TASKS = 200;
 
     private final Map<String, McpTask> tasks = new ConcurrentHashMap<>();
     private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
@@ -173,6 +174,7 @@ public class McpTaskManager {
      * List all tasks with optional status filter
      */
     public List<McpTask> listTasks(McpTask.Status statusFilter) {
+        cleanupOldTasks();
         if (statusFilter == null) {
             return new ArrayList<>(tasks.values());
         }
@@ -220,16 +222,36 @@ public class McpTaskManager {
     }
 
     /**
-     * Clean up old completed tasks
+     * Clean up old completed tasks. Combines time-based eviction (anything older
+     * than TASK_RETENTION_HOURS) with a hard size cap (keep at most
+     * MAX_TERMINAL_TASKS terminal tasks, dropping oldest first).
+     * Running/pending tasks are never evicted.
      */
     private void cleanupOldTasks() {
         Instant cutoff = Instant.now().minus(TASK_RETENTION_HOURS, ChronoUnit.HOURS);
 
+        // Time-based: anything terminal and older than retention
         List<String> toRemove = tasks.entrySet().stream()
             .filter(e -> e.getValue().isTerminal())
             .filter(e -> e.getValue().getCompletedAt() != null && e.getValue().getCompletedAt().isBefore(cutoff))
             .map(Map.Entry::getKey)
             .collect(Collectors.toList());
+
+        // Size-based: if still over the cap after time eviction, drop oldest terminal tasks
+        long remainingTerminal = tasks.values().stream()
+            .filter(McpTask::isTerminal)
+            .count() - toRemove.size();
+        if (remainingTerminal > MAX_TERMINAL_TASKS) {
+            long excess = remainingTerminal - MAX_TERMINAL_TASKS;
+            tasks.entrySet().stream()
+                .filter(e -> e.getValue().isTerminal())
+                .filter(e -> !toRemove.contains(e.getKey()))
+                .filter(e -> e.getValue().getCompletedAt() != null)
+                .sorted((a, b) -> a.getValue().getCompletedAt().compareTo(b.getValue().getCompletedAt()))
+                .limit(excess)
+                .map(Map.Entry::getKey)
+                .forEach(toRemove::add);
+        }
 
         for (String taskId : toRemove) {
             tasks.remove(taskId);
