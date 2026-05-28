@@ -293,7 +293,8 @@ class DebuggerHelpers:
             if not actions:
                 return 'action ' + action_name_field + ' not available (wrong state?)'
             for entry in actions.values():
-                entry.invoke(False)
+                # ActionEntry uses invokeAsync(prompt) returning a Future
+                entry.invokeAsync(False)
                 return 'ok'
         except Exception as e: return 'error: ' + str(e)
     def resume(self, thread=None):
