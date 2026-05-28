@@ -391,6 +391,60 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 
 **Address spaces.** `dbg.set_breakpoint` / `delete_breakpoints` take static Ghidra addresses (auto-mapped to live via the trace). The memory methods (`read_memory`, `write_memory`, `refresh_memory`) accept *either* a static or a live address and translate automatically when the value falls in `currentProgram`'s image range. If `read_memory` returns all zeros for a known-mapped region, the page is "cold" — call `refresh_memory(addr, length)` first.
 
+A `reng` helper object is pre-injected for reverse-engineering workflows. Works with or without a live debugger session; some methods require dynamic state, others operate purely on static analysis.
+
+**ASLR address conversion:**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.image_base()` | Runtime image base of `currentProgram` (canonical, from trace module manager; falls back to thread-name parsing if modules aren't enumerated yet) |
+| `reng.to_rt(static_addr)` | Convert static Ghidra address → live runtime address |
+| `reng.to_static(rt_addr)` | Convert live runtime address → static Ghidra address |
+
+**RTTI inspection (MSVC x64):**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.rtti(rt_obj_ptr)` | Decode the C++ class name of a live object pointer (reads `vtable[-8]` → `RTTICompleteObjectLocator` → `TypeDescriptor`) |
+| `reng.class_hierarchy(rt_ptr)` | Full inheritance chain: `[{class, offset, index}]` ordered base → derived |
+| `reng.vtable_methods(rt_ptr, max=128)` | List vtable slots: `[{slot, rt, static, name, named}]` — `name` comes from Ghidra analysis |
+| `reng.scan_vtables(prog=None)` | Scan `.rdata` for all RTTI vtables; returns `{vtable_static_addr: class_name}` (cached per program) |
+| `reng.rename_vfuncs(vtable_map=None, dry_run=False)` | Bulk-rename `FUN_*` into `ClassName::vfunc_N` using `scan_vtables` map |
+
+**ReClass.NET-style struct exploration** (backed by Ghidra's `DataTypeManager` — no parallel store; reads from and writes to the existing DTM):
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.explore(rt_addr, size=256)` | Field table at a live address; inherited fields tagged `(from ClassName)`; auto-detects vtable / fn-ptrs / sub-object pointers / nulls / floats |
+| `reng.follow(rt_addr, offset)` | Dereference the pointer at `[rt_addr+offset]` and `explore()` the sub-object |
+| `reng.tree(rt_addr, depth=2, max_ptrs=8, size=128)` | Recursive exploration that follows pointer fields |
+| `reng.diff(rt_addr1, rt_addr2, size=256, threshold=0)` | Compare two instances; returns differing 8-byte slots — the "damage one Actor, diff to find health" technique |
+| `reng.as_array(rt_addr, offset, count, type_str='f32')` | Read N consecutive typed values (`f32`/`u32`/`ptr`/...) |
+| `reng.as_known(rt_addr, offset, struct_name)` | Read an inline embedded sub-struct using a Ghidra DataType name (e.g. `NiPoint3` for an embedded XYZ) |
+| `reng.read_struct(rt_addr, {fname: (off, type)})` | Read named fields from an explicit field map |
+| `reng.find_type_at(rt_addr, offset, size=8)` | Cross-reference a single field against Ghidra's view (function? known vtable? small int? float?) |
+
+**Struct authoring (C++ inheritance-aware):**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.define_class(name, own_fields, base_class=None, total_size=None, category='/')` | Create/update a struct with proper inheritance — embeds `base_class` at offset 0 so the decompiler shows `this->BaseClass_base.field` |
+| `reng.build_hierarchy(rt_ptr)` | Auto-build the full RTTI inheritance chain in the DTM (e.g. `TESForm → TESObjectREFR → Actor`); preserves existing named fields |
+| `reng.define_struct(name, fields, category='/')` | Flat struct (no inheritance) — for simple/value types; call with `fields={}` to inspect current definition |
+| `reng.patch_struct(name, fields, force=False)` | Targeted field update for partially RE'd projects: overwrites provisional names (`unk*`/`pad*`/`gap*`/`field_*`) freely; `force=True` to overwrite established names |
+| `reng.is_provisional(field_name)` | True if name matches `reng.PROVISIONAL_PREFIXES` (configurable per project) |
+| `reng.apply_struct(addr, struct_name, is_runtime=False)` | Apply a Ghidra DataType to an address in the Listing view |
+| `reng.rename_function(static_addr, new_name, namespace=None)` | Rename a function (USER_DEFINED source; survives re-analysis); optional class namespace |
+
+**Script management** (prefer the `scripts` MCP tool for interactive use; these helpers exist for use inside `eval_python`):
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.save_script(name, code, category='MCP', description='')` | Save to `~/ghidra_scripts/`; prepends `@category`/`@description` metadata |
+| `reng.list_scripts(pattern=None)` | List scripts: `[{name, path, category, description}]` |
+| `reng.load_script(name)` | Read script source for review/editing |
+| `reng.run_script(name)` | Execute existing script in the current Ghidra context |
+
 #### `debugger` - Debugger Session Management
 
 Use before `eval_python` to confirm a session is active or diagnose connection issues.
