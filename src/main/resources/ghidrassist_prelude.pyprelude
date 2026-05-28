@@ -336,6 +336,8 @@ class DebuggerHelpers:
     def ensure_static_mapping(self):
         '''Ensure currentProgram is mapped to the live trace's module.
         Required for breakpoints set on static addresses to resolve to runtime.
+        Skips if a mapping for this module base → this program already exists,
+        avoiding duplicate/conflicting mappings across re-attaches.
         Returns True if mapping is established (or already exists), False otherwise.'''
         try:
             from ghidra.app.services import DebuggerStaticMappingService
@@ -353,9 +355,23 @@ class DebuggerHelpers:
                 if str(m.getName(snap)).lower().endswith(prog_name.lower()):
                     mod = m; break
             if mod is None: return False
-            trace_loc = DefaultTraceLocation(trace, None, Lifespan.nowOn(snap), mod.getBase(snap))
+            mod_base   = mod.getBase(snap)
+            mod_length = mod.getLength(snap)
+            # Dedup: skip if any existing static mapping covers this module base
+            # and points to a program whose name matches currentProgram.
+            try:
+                for entry in trace.getStaticMappingManager().getAllEntries():
+                    entry_start = entry.getMinTraceAddress()
+                    entry_end   = entry.getMaxTraceAddress()
+                    if (entry_start.getOffset() <= mod_base.getOffset() <=
+                            entry_end.getOffset()):
+                        url = entry.getStaticProgramURL()
+                        if url and url.getPath().endswith(prog_name):
+                            return True  # already mapped, no-op
+            except Exception: pass
+            trace_loc = DefaultTraceLocation(trace, None, Lifespan.nowOn(snap), mod_base)
             prog_loc  = ProgramLocation(currentProgram, currentProgram.getImageBase())
-            map_svc.addMapping(trace_loc, prog_loc, mod.getLength(snap), False)
+            map_svc.addMapping(trace_loc, prog_loc, mod_length, False)
             return True
         except Exception: return False
 
