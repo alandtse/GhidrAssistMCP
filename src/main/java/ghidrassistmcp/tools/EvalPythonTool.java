@@ -77,74 +77,26 @@ public class EvalPythonTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Execute arbitrary Python code in Ghidra's context. Requires pyghidra.bat for Python 3 or uses Jython 2.7. " +
-            "Agentic Prelude Active (call via 'ghidra.method'):\n" +
-            "- decompile(id): Decompile func name/addr\n" +
-            "- get_func(id): Return Function object\n" +
-            "- get_program(name): Return open Program object by name\n" +
-            "- get_vt_sessions(): Return list of all open VTSessions\n" +
-            "- get_vt_session(idx=0): Return a VTSession by index\n" +
-            "- list_vt_sessions(): Return [{name, src, dst, match_count}] for open sessions\n" +
-            "- get_vt_matches(session=None, status=None): Return [{src, dst, status, similarity, confidence}]; status=ACCEPTED/REJECTED/AVAILABLE\n" +
-            "- find_addr_in_version(addr, session=None): Find ACCEPTED destination address for a source address\n" +
-            "- accept_vt_match(src_addr, session=None): Accept first AVAILABLE match for src address\n" +
-            "- copy_datatype(name, from_prog, to_prog): Copy a Struct/Enum across binaries\n" +
-            "- get_refs_to(addr): List of callers' addresses\n" +
-            "- set_comment(addr, text, type='eol'|'pre'|'post'|'plate'): Set comment\n" +
-            "- find_struct(name): Get Struct DT object\n" +
-            "- read_bytes(addr, length): Hex memory read\n" +
-            "- VT: VTSession and VTMatchInfo are auto-imported\n" +
-            "Context provided: currentProgram, currentAddress, monitor.\n" +
-            "Symbol search tips:\n" +
-            "- For a known name: currentProgram.getSymbolTable().getSymbols('exactName')\n" +
-            "- For all symbols of one type: getDefinedSymbols() (NOT getSymbolIterator — that one is unbounded and may stall)\n" +
-            "- For functions: currentProgram.getFunctionManager().getFunctions(True) (sorted iterator)\n\n" +
-            "Debugger Prelude Active (call via 'dbg.method') — requires Debugger plugin + active session:\n" +
-            "  Session:     dbg.status() → {connected, trace, snap, thread, has_live_target, control_mode}\n" +
-            "  ⚠ ASLR: live process addresses ≠ Ghidra static addresses. ALL dbg.*_memory and\n" +
-            "    dbg.set_breakpoint take LIVE addresses. Convert via reng.to_rt(static_addr).\n" +
-            "    dbg.list_modules() shows all module runtime base addresses.\n" +
-            "  Threads:     dbg.get_threads() → [TraceThread, ...]  dbg.get_thread() / dbg.get_snap()\n" +
-            "  Modules:     dbg.list_modules(name_filter=None) → [{name, base, length, path}]\n" +
-            "  Registers:   dbg.get_registers(thread, frame, snap) → {name: int}  dbg.refresh_registers()\n" +
-            "               dbg.write_register(name, value)\n" +
-            "  Memory:      dbg.read_memory(live_addr, length, snap) → hex string  dbg.refresh_memory(live_addr, n)\n" +
-            "               dbg.write_memory(live_addr, hex_bytes)\n" +
-            "  Execution:   dbg.resume() / dbg.interrupt() / dbg.step_into() / dbg.step_over() / dbg.step_out() / dbg.kill()\n" +
-            "  Breakpoints: dbg.list_breakpoints() / dbg.set_breakpoint(static_addr, length, name) / dbg.delete_breakpoints(static_addr)\n" +
-            "               (set/delete take STATIC addresses; auto-mapped to live via DebuggerStaticMappingService)\n" +
-            "  Stack:       dbg.get_stack(thread, snap) → [{level, pc}]\n" +
-            "  Workflow: call dbg.status() first; if connected=False use `debugger` tool.\n\n" +
-            "Reverse Engineering Prelude Active (call via 'reng.method') — works with or without live debugger:\n" +
-            "  Address:     reng.image_base() / reng.to_rt(static) / reng.to_static(runtime)\n" +
-            "  RTTI:        reng.rtti(rt_ptr) → class name   reng.class_hierarchy(rt_ptr) → inheritance chain\n" +
-            "               reng.vtable_methods(rt_ptr) → [{slot, rt, static, name, named}]\n" +
-            "  ReClass.NET struct exploration (backed by Ghidra DataTypeManager):\n" +
-            "    reng.explore(rt_addr, size=256)     → field table with known field names + auto-inference\n" +
-            "                                           INHERITED fields shown with (from ClassName) tag\n" +
-            "    reng.follow(rt_addr, offset)         → dereference ptr at offset, explore sub-object\n" +
-            "    reng.as_array(rt_addr, off, N, type) → read N consecutive typed values (f32/u32/ptr/...)\n" +
-            "    reng.as_known(rt_addr, off, 'Type')  → read inline (non-ptr) embedded struct by Ghidra type name\n" +
-            "    reng.diff(ptr_a, ptr_b)              → fields differing between two instances\n" +
-            "                                           KEY: damage one Actor, diff → health offset revealed\n" +
-            "    reng.tree(ptr, depth=2)              → recursive exploration (follows ptr fields)\n" +
-            "    reng.find_type_at(rt_addr, offset)   → cross-reference a single field\n" +
-            "    reng.read_struct(rt_addr, fields)    → {name: val} from explicit field map\n" +
-            "  Struct authoring (C++ inheritance-aware):\n" +
-            "    reng.define_class(name, own_fields, base_class='TESObjectREFR') → embeds base at offset 0\n" +
-            "      CORRECT for inheritance; decompiler shows this->TESObjectREFR_base.formID\n" +
-            "      own_fields = {fname: (abs_offset, size, comment)} — offsets >= sizeof(base)\n" +
-            "    reng.build_hierarchy(rt_ptr) → auto-build full chain from RTTI (TESForm→TESObjectREFR→Actor→...)\n" +
-            "    reng.define_struct(name, fields) → flat struct, no inheritance (for simple/value types)\n" +
-            "      Call with fields={} to inspect current definition; existing named fields preserved\n" +
-            "    reng.apply_struct(static_addr, name) → apply DataType to Ghidra Listing view\n" +
-            "  RTTI/vtable bulk operations:\n" +
-            "    reng.scan_vtables() → {vtable_static_addr: class_name} — scans .rdata RTTI (cached)\n" +
-            "    reng.rename_vfuncs(dry_run=False) → renames FUN_* into ClassName::vfunc_N\n" +
-            "  Script management:\n" +
-            "    reng.save_script(name, code, category, description) → saves to ~/ghidra_scripts/\n" +
-            "    reng.list_scripts(pattern) / reng.load_script(name) / reng.run_script(name)\n" +
-            "    (Prefer the `scripts` MCP tool for interactive script management)";
+        return "Execute Python in Ghidra's context. Requires pyghidra (Python 3) or falls back to Jython 2.7. " +
+            "Async: every call submits a task; poll get_task_status with the returned task_id.\n\n" +
+            "Globals: currentProgram, currentAddress, monitor, state. Symbol search: prefer " +
+            "currentProgram.getSymbolTable().getSymbols('name') or getFunctionManager().getFunctions(True); " +
+            "AVOID getSymbolIterator() (unbounded, can stall).\n\n" +
+            "Three injected helper objects (use dir(x) or help(x.method) for per-method docs):\n" +
+            "  ghidra.* — static analysis: decompile, get_func, find_struct, get_refs_to, set_comment, " +
+            "read_bytes; VT helpers (get_vt_sessions, get_vt_matches, find_addr_in_version, accept_vt_match).\n" +
+            "  dbg.*    — live debugger (call dbg.status() first). Memory, registers, breakpoints, stepping, " +
+            "dbg.list_modules() for runtime bases, dbg.detach() for clean disconnect, dbg.cleanup() to compact trace.\n" +
+            "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static), RTTI (rtti/class_hierarchy/vtable_methods), " +
+            "ReClass-style struct exploration (explore/follow/tree/diff/as_known/as_array), authoring " +
+            "(define_class/define_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
+            "CRITICAL — ASLR address spaces:\n" +
+            "  dbg.read_memory/write_memory/refresh_memory take LIVE runtime addresses.\n" +
+            "  dbg.set_breakpoint/delete_breakpoints take STATIC Ghidra addresses (auto-mapped).\n" +
+            "  Convert: live = reng.to_rt(static); static = reng.to_static(live).\n" +
+            "  dbg.read_memory returning all zeros usually means cold page not captured — " +
+            "call dbg.refresh_memory(live_addr, len) first.\n\n" +
+            "Companion MCP tools: `debugger` (session status), `scripts` (Script Manager), `project` (open programs).";
     }
 
     @Override
