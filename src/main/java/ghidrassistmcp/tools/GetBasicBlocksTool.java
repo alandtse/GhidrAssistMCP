@@ -66,7 +66,7 @@ public class GetBasicBlocksTool implements McpTool {
         }
 
         StringBuilder result = new StringBuilder();
-        result.append("Basic Blocks for: ").append(function.getName())
+        result.append("Basic Blocks for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         try {

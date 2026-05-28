@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
-- **37 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **46 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,14 +99,63 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (37 total)
+- **View all available tools** (46 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
 
+## Headless Mode Quickstart
+
+GhidrAssistMCP can also be started from Ghidra's `analyzeHeadless` launcher. This is useful when you want MCP access to a program loaded in headless Ghidra without opening the CodeBrowser UI.
+
+First, build and install the extension so Ghidra can load the compiled classes and bundled dependencies:
+
+```bash
+cd /path/to/GhidrAssistMCP
+
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.0_PUBLIC
+gradle installExtension
+```
+
+Set paths for your Ghidra install and extracted user extension. On Linux, Ghidra user extensions usually live under `~/.config/ghidra/<ghidra_profile>/Extensions`:
+
+```bash
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.0_PUBLIC
+export GHIDRA_USER_EXTENSIONS_DIR="$HOME/.config/ghidra/ghidra_12.0_PUBLIC/Extensions"
+export GHIDRASSISTMCP_EXT="$GHIDRA_USER_EXTENSIONS_DIR/GhidrAssistMCP"
+```
+
+Import a binary and start the MCP server as a headless pre-script:
+
+```bash
+"$GHIDRA_INSTALL_DIR/support/analyzeHeadless" /tmp/ghidra-projects McpHeadless \
+  -import /path/to/binary \
+  -scriptPath "$GHIDRASSISTMCP_EXT/ghidra_scripts" \
+  -preScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
+```
+
+For a binary that is already imported into the project, use `-process` instead:
+
+```bash
+"$GHIDRA_INSTALL_DIR/support/analyzeHeadless" /tmp/ghidra-projects McpHeadless \
+  -process binary_name \
+  -scriptPath "$GHIDRASSISTMCP_EXT/ghidra_scripts" \
+  -preScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
+```
+
+MCP clients can connect to:
+
+```text
+SSE:             http://127.0.0.1:8080/sse
+SSE messages:    http://127.0.0.1:8080/message
+Streamable HTTP: http://127.0.0.1:8080/mcp
+```
+
+The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. Keep that process alive while clients are connected; when `analyzeHeadless` exits, the MCP server exits with it.
+
 ## Available Tools
 
-GhidrAssistMCP provides 37 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 46 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -114,6 +163,11 @@ GhidrAssistMCP provides 37 tools organized into categories. Several tools use an
 | ---- | ----------- |
 | `get_binary_info` | Get basic program information (name, architecture, compiler, etc.) |
 | `list_binaries` | List all open programs across all CodeBrowser windows |
+| `assemble_code` | Assemble instruction text at an address and optionally patch it into program memory |
+| `patch_bytes` | Patch raw bytes in program memory at a given address |
+| `export_program` | Export the current program to disk (`binary` or `original_file`) *(disabled by default)* |
+
+> **Security-sensitive tools:** `import_file` and `export_program` are disabled by default because they interact with the host filesystem. Enable them explicitly in the plugin configuration UI when needed.
 
 ### Function Discovery & Analysis
 
@@ -636,7 +690,7 @@ src/main/java/ghidrassistmcp/
 ├── tasks/                         # Async task system
 ├── resources/                     # MCP resources
 ├── prompts/                       # MCP prompts
-└── tools/                         # Tool implementations (35 files)
+└── tools/                         # Tool implementations
 ```
 
 ### Adding New Tools

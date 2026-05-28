@@ -73,7 +73,7 @@ public class TraceDataFlowPrompt implements McpPrompt {
 
             if (function != null) {
                 context.append("## Function Information\n");
-                context.append("- **Name**: ").append(function.getName()).append("\n");
+                context.append("- **Name**: ").append(function.getName(true)).append("\n");
                 context.append("- **Address**: ").append(function.getEntryPoint()).append("\n");
                 context.append("- **Signature**: ").append(function.getPrototypeString(false, false)).append("\n\n");
 

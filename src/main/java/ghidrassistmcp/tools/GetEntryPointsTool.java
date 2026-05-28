@@ -42,8 +42,8 @@ public class GetEntryPointsTool implements McpTool {
             Address addr = entryPoints.next();
             Function func = currentProgram.getFunctionManager().getFunctionAt(addr);
             Symbol[] symbols = currentProgram.getSymbolTable().getSymbols(addr);
-            String name = func != null ? func.getName() :
-                          (symbols.length > 0 ? symbols[0].getName() : "unknown");
+            String name = func != null ? func.getName(true) :
+                          (symbols.length > 0 ? symbols[0].getName(true) : "unknown");
 
             sb.append("- ").append(addr).append(" ").append(name);
             if (func != null) {

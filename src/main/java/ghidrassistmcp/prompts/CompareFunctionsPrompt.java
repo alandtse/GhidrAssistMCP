@@ -66,7 +66,7 @@ public class CompareFunctionsPrompt implements McpPrompt {
     private void appendFunctionContext(StringBuilder context, Program program, String identifier, String label) {
         Function function = findFunction(program, identifier);
         if (function != null) {
-            context.append("## ").append(label).append(": ").append(function.getName())
+            context.append("## ").append(label).append(": ").append(function.getName(true))
                    .append(" @ ").append(function.getEntryPoint()).append("\n");
             context.append("- Signature: ").append(function.getPrototypeString(false, false)).append("\n");
             context.append("- Size: ").append(function.getBody().getNumAddresses()).append(" bytes\n");

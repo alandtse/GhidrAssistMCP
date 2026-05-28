@@ -99,7 +99,7 @@ public class ListFunctionsTool implements McpTool {
             Function function = functions.next();
 
             if (hasPattern) {
-                String functionName = caseSensitive ? function.getName() : function.getName().toLowerCase();
+                String functionName = caseSensitive ? function.getName(true) : function.getName(true).toLowerCase();
                 if (functionName.contains(searchPattern)) {
                     matchingFunctions.add(function);
                 }
@@ -114,7 +114,7 @@ public class ListFunctionsTool implements McpTool {
         // Apply offset and limit
         for (int i = offset; i < matchingFunctions.size() && count < limit; i++) {
             Function function = matchingFunctions.get(i);
-            result.append("- ").append(function.getName())
+            result.append("- ").append(function.getName(true))
                   .append(" @ ").append(function.getEntryPoint())
                   .append(" (").append(function.getParameterCount()).append(" params)")
                   .append("\n");

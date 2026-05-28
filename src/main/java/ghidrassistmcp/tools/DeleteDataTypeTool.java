@@ -14,6 +14,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
+import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.McpTool;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -115,7 +116,7 @@ public class DeleteDataTypeTool implements McpTool {
         int txId = currentProgram.startTransaction("Delete Data Type");
         boolean committed = false;
         try {
-            boolean removed = dtm.remove(target);
+            boolean removed = dtm.remove(target, TaskMonitor.DUMMY);
             if (!removed) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Failed to delete data type '" + target.getName() + "' at " + safePath(target) + ". " +

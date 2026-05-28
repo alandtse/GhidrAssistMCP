@@ -29,15 +29,21 @@ import ghidrassistmcp.resources.ProgramInfoResource;
 import ghidrassistmcp.resources.StringsResource;
 import ghidrassistmcp.tasks.McpTask;
 import ghidrassistmcp.tasks.McpTaskManager;
+import ghidrassistmcp.tools.AssembleCodeTool;
 import ghidrassistmcp.tools.BookmarksTool;
 import ghidrassistmcp.tools.CancelTaskTool;
 import ghidrassistmcp.tools.ClassTool;
 import ghidrassistmcp.tools.CommentsTool;
 import ghidrassistmcp.tools.CreateDataVarTool;
+import ghidrassistmcp.tools.CreateFunctionTool;
+import ghidrassistmcp.tools.DisassembleAtTool;
 import ghidrassistmcp.tools.EnumTool;
 import ghidrassistmcp.tools.EquateTool;
 import ghidrassistmcp.tools.EvalPythonTool;
 import ghidrassistmcp.tools.GetBasicBlocksTool;
+import ghidrassistmcp.tools.ImportFileTool;
+import ghidrassistmcp.tools.OpenProgramTool;
+import ghidrassistmcp.tools.ExportProgramTool;
 import ghidrassistmcp.tools.GetCodeTool;
 import ghidrassistmcp.tools.GetCurrentAddressTool;
 import ghidrassistmcp.tools.GetCurrentFunctionTool;
@@ -61,6 +67,7 @@ import ghidrassistmcp.tools.ListTasksTool;
 import ghidrassistmcp.tools.ProgramInfoTool;
 import ghidrassistmcp.tools.RenameSymbolBatchTool;
 import ghidrassistmcp.tools.RenameSymbolTool;
+import ghidrassistmcp.tools.PatchBytesTool;
 import ghidrassistmcp.tools.SearchBytesTool;
 import ghidrassistmcp.tools.SearchFunctionsByNameTool;
 import ghidrassistmcp.tools.SearchStringsTool;
@@ -144,7 +151,20 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new GetFunctionStackLayoutTool());
         registerTool(new SearchStringsTool());
         registerTool(new CreateDataVarTool());
+        registerTool(new CreateFunctionTool());       // create_function
+        registerTool(new DisassembleAtTool());         // disassemble_at
         registerTool(new GetEntryPointsTool());
+
+        // Register project-level tools
+        registerTool(new OpenProgramTool());          // open_program: open/list project files in CodeBrowser
+        registerTool(new AssembleCodeTool());         // assemble_code: assemble instructions and optionally patch bytes
+        registerTool(new PatchBytesTool());           // patch_bytes: write patched bytes into program memory
+
+        // Register tools that are disabled by default (security-sensitive)
+        registerTool(new ImportFileTool());
+        toolEnabledStates.put("import_file", false); // disabled by default: exposes host file-system read access
+        registerTool(new ExportProgramTool());
+        toolEnabledStates.put("export_program", false); // disabled by default: writes files to host filesystem
 
         // Register async task management tools
         registerTool(new GetTaskStatusTool());

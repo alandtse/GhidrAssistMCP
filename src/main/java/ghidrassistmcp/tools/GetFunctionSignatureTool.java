@@ -71,7 +71,7 @@ public class GetFunctionSignatureTool implements McpTool {
             new NativeFunctionSignatureGenerator(currentProgram, TaskMonitor.DUMMY);
 
         JsonObject result = new JsonObject();
-        result.addProperty("name", function.getName());
+        result.addProperty("name", function.getName(true));
         result.addProperty("address", function.getEntryPoint().toString());
         String signature = generator.generate(function);
         if (signature == null) {

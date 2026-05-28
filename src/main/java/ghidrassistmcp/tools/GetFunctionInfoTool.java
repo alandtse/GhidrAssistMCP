@@ -66,7 +66,7 @@ public class GetFunctionInfoTool implements McpTool {
             if (function.getName().equals(functionName)) {
                 StringBuilder info = new StringBuilder();
                 info.append("Function Information:\n");
-                info.append("Name: ").append(function.getName()).append("\n");
+                info.append("Name: ").append(function.getName(true)).append("\n");
                 info.append("Entry Point: ").append(function.getEntryPoint()).append("\n");
                 info.append("Body: ").append(function.getBody()).append("\n");
                 info.append("Parameter Count: ").append(function.getParameterCount()).append("\n");

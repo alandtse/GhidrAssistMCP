@@ -140,13 +140,13 @@ public class GetCodeTool implements McpTool {
 
             if (results.isTimedOut()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation timed out for function: " + function.getName())
+                    .addTextContent("Decompilation timed out for function: " + function.getName(true))
                     .build();
             }
 
             if (results.isValid() == false) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation error for function " + function.getName() + ": " + results.getErrorMessage())
+                    .addTextContent("Decompilation error for function " + function.getName(true) + ": " + results.getErrorMessage())
                     .build();
             }
 
@@ -154,17 +154,17 @@ public class GetCodeTool implements McpTool {
 
             if (decompiledCode == null || decompiledCode.trim().isEmpty()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("No decompiled code available for function: " + function.getName())
+                    .addTextContent("No decompiled code available for function: " + function.getName(true))
                     .build();
             }
 
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Decompiled function " + function.getName() + ":\n\n" + decompiledCode)
+                .addTextContent("Decompiled function " + function.getName(true) + ":\n\n" + decompiledCode)
                 .build();
 
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error decompiling function " + function.getName() + ": " + e.getMessage())
+                .addTextContent("Error decompiling function " + function.getName(true) + ": " + e.getMessage())
                 .build();
         } finally {
             decompiler.dispose();
@@ -176,7 +176,7 @@ public class GetCodeTool implements McpTool {
      */
     private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function) {
         StringBuilder result = new StringBuilder();
-        result.append("Disassembly of function: ").append(function.getName()).append("\n");
+        result.append("Disassembly of function: ").append(function.getName(true)).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
 
         // Iterate through instructions in the function
@@ -221,7 +221,7 @@ public class GetCodeTool implements McpTool {
      */
     private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw) {
         StringBuilder result = new StringBuilder();
-        result.append("P-Code for: ").append(function.getName())
+        result.append("P-Code for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         DecompInterface decompiler = new DecompInterface();
@@ -231,14 +231,14 @@ public class GetCodeTool implements McpTool {
 
             if (!results.decompileCompleted()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation failed for function: " + function.getName())
+                    .addTextContent("Decompilation failed for function: " + function.getName(true))
                     .build();
             }
 
             HighFunction highFunction = results.getHighFunction();
             if (highFunction == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Could not get high function for: " + function.getName())
+                    .addTextContent("Could not get high function for: " + function.getName(true))
                     .build();
             }
 
@@ -276,7 +276,7 @@ public class GetCodeTool implements McpTool {
 
             // Add summary
             result.append("## Summary:\n");
-            result.append("- Function: ").append(function.getName()).append("\n");
+            result.append("- Function: ").append(function.getName(true)).append("\n");
             result.append("- Entry: ").append(function.getEntryPoint()).append("\n");
 
             var blocks = highFunction.getBasicBlocks();

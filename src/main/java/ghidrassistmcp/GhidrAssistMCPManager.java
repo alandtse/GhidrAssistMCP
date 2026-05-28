@@ -5,6 +5,8 @@ package ghidrassistmcp;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import ghidra.app.services.ProgramManager;
@@ -311,7 +313,7 @@ public class GhidrAssistMCPManager {
      * Apply configuration changes.
      */
     public void applyConfiguration(String host, int port, boolean enabled, boolean asyncEnabled,
-                                   java.util.Map<String, Boolean> toolStates) {
+                                   Map<String, Boolean> toolStates) {
         if (provider != null) {
             provider.logMessage("Applying configuration: " + host + ":" + port + " enabled=" + enabled + " async=" + asyncEnabled);
         }
@@ -327,6 +329,13 @@ public class GhidrAssistMCPManager {
         if (enabled != serverEnabled) {
             serverEnabled = enabled;
             needsRestart = true;
+        }
+
+        if (server != null && toolStatesChanged(toolStates)) {
+            needsRestart = true;
+            if (provider != null) {
+                provider.logMessage("Tool availability changed; restarting MCP server to update discovery");
+            }
         }
 
         // Update async execution setting
@@ -349,6 +358,26 @@ public class GhidrAssistMCPManager {
         if (provider != null) {
             provider.refreshToolsList();
         }
+    }
+
+    /**
+     * MCP tool discovery is built when the server starts, so changed tool states
+     * require a restart before clients see the updated catalog.
+     */
+    private boolean toolStatesChanged(Map<String, Boolean> toolStates) {
+        if (backend == null || toolStates == null) {
+            return false;
+        }
+
+        Map<String, Boolean> currentStates = backend.getToolEnabledStates();
+        for (Map.Entry<String, Boolean> entry : toolStates.entrySet()) {
+            String toolName = entry.getKey();
+            if (currentStates.containsKey(toolName) &&
+                !Objects.equals(currentStates.get(toolName), entry.getValue())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

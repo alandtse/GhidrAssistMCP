@@ -51,7 +51,7 @@ public class GetFunctionStackLayoutTool implements McpTool {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("Stack Layout for: ").append(function.getName())
+        sb.append("Stack Layout for: ").append(function.getName(true))
           .append(" @ ").append(function.getEntryPoint()).append("\n");
         sb.append("Frame size: ").append(stackFrame.getFrameSize()).append(" bytes\n");
         sb.append("Return address offset: ").append(stackFrame.getReturnAddressOffset()).append("\n\n");

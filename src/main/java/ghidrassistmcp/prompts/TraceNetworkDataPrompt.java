@@ -258,7 +258,7 @@ public class TraceNetworkDataPrompt implements McpPrompt {
         } else {
             for (Function func : networkFunctions.get("send")) {
                 if (func != null) {
-                    context.append("- **").append(func.getName()).append("** @ ").append(func.getEntryPoint()).append("\n");
+                    context.append("- **").append(func.getName(true)).append("** @ ").append(func.getEntryPoint()).append("\n");
                 }
             }
             context.append("\n");
@@ -278,7 +278,7 @@ public class TraceNetworkDataPrompt implements McpPrompt {
         } else {
             for (Function func : networkFunctions.get("recv")) {
                 if (func != null) {
-                    context.append("- **").append(func.getName()).append("** @ ").append(func.getEntryPoint()).append("\n");
+                    context.append("- **").append(func.getName(true)).append("** @ ").append(func.getEntryPoint()).append("\n");
                 }
             }
             context.append("\n");
@@ -298,7 +298,7 @@ public class TraceNetworkDataPrompt implements McpPrompt {
         } else {
             for (Function func : networkFunctions.get("socket")) {
                 if (func != null) {
-                    context.append("- **").append(func.getName()).append("** @ ").append(func.getEntryPoint()).append("\n");
+                    context.append("- **").append(func.getName(true)).append("** @ ").append(func.getEntryPoint()).append("\n");
                 }
             }
             context.append("\n");

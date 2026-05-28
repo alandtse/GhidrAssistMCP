@@ -51,8 +51,8 @@ public class SearchFunctionsByNameTool implements McpTool {
 
         int count = 0;
         for (Function func : currentProgram.getFunctionManager().getFunctions(true)) {
-            if (func.getName().toLowerCase().contains(searchLower)) {
-                result.append("- ").append(func.getName())
+            if (func.getName(true).toLowerCase().contains(searchLower)) {
+                result.append("- ").append(func.getName(true))
                       .append(" @ ").append(func.getEntryPoint())
                       .append(" (").append(func.getParameterCount()).append(" params)\n");
                 count++;

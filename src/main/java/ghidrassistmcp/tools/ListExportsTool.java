@@ -80,17 +80,15 @@ public class ListExportsTool implements McpTool {
                     continue;
                 }
                 
-                // Apply limit
-                if (count >= limit) {
-                    break;
+                // Apply limit to displayed results only; keep scanning for a true total.
+                if (count < limit) {
+                    result.append("- ").append(symbol.getName())
+                          .append(" @ ").append(symbol.getAddress())
+                          .append(" (").append(symbol.getSymbolType()).append(")")
+                          .append("\n");
+
+                    count++;
                 }
-                
-                result.append("- ").append(symbol.getName())
-                      .append(" @ ").append(symbol.getAddress())
-                      .append(" (").append(symbol.getSymbolType()).append(")")
-                      .append("\n");
-                
-                count++;
             }
         }
         
