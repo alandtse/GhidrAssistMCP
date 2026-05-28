@@ -1,0 +1,1363 @@
+import ghidra.app.decompiler.DecompInterface as DecompInterface
+import ghidra.util.task.TaskMonitor as TaskMonitor
+import ghidra.program.model.listing.CommentType as CommentType
+import ghidra.program.model.symbol.SourceType as SourceType
+try:
+    from ghidra.feature.vt.api.main import VTSession, VTMatchInfo
+except: pass
+class GhidraHelpers:
+    def get_program(self, name):
+        try:
+            from ghidra.app.services import ProgramManager
+            pm = state.getTool().getService(ProgramManager)
+            for p in pm.getAllOpenPrograms():
+                if p.getName() == name: return p
+        except: pass
+        return None
+    def _iter_all_tools(self):
+        '''Yield every running PluginTool across all workspaces (includes VT tool windows).'''
+        seen = set()
+        try:
+            proj = state.getProject()
+            if proj:
+                for ws in proj.getToolManager().getWorkspaces():
+                    for t in ws.getTools():
+                        if id(t) not in seen:
+                            seen.add(id(t)); yield t
+        except: pass
+    def get_vt_sessions(self):
+        '''Return all open VTSessions found across all running Ghidra tools.'''
+        sessions = []
+        seen = set()
+        for tool in self._iter_all_tools():
+            # Approach 1: ask for VTController service directly
+            try:
+                from ghidra.feature.vt.gui.plugin import VTController
+                ctrl = tool.getService(VTController)
+                if ctrl:
+                    sess = ctrl.getSession()
+                    if sess is not None and id(sess) not in seen:
+                        seen.add(id(sess)); sessions.append(sess)
+                    continue
+            except: pass
+            # Approach 2: scan managed plugins for one that exposes getSession()
+            try:
+                for plugin in tool.getManagedPlugins():
+                    cname = plugin.getClass().getSimpleName()
+                    if 'VT' in cname or 'VersionTracking' in cname:
+                        try:
+                            sess = plugin.getSession()
+                            if sess is not None and id(sess) not in seen:
+                                seen.add(id(sess)); sessions.append(sess)
+                        except: pass
+                        try:
+                            sess = plugin.getController().getSession()
+                            if sess is not None and id(sess) not in seen:
+                                seen.add(id(sess)); sessions.append(sess)
+                        except: pass
+            except: pass
+        return sessions
+    def get_vt_session(self, idx=0):
+        sessions = self.get_vt_sessions()
+        return sessions[idx] if len(sessions) > idx else None
+    def copy_datatype(self, name, from_prog, to_prog):
+        try:
+            from ghidra.program.model.data import DataTypeConflictHandler
+            dt = None
+            for d in from_prog.getDataTypeManager().getAllDataTypes():
+                if d.getName() == name:
+                    dt = d
+                    break
+            if dt:
+                to_prog.getDataTypeManager().addDataType(dt, DataTypeConflictHandler.REPLACE_HANDLER)
+                return True
+        except: pass
+        return False
+    def get_addr(self, s):
+        if hasattr(s, 'getAddress'): return s.getAddress()
+        return currentProgram.getAddressFactory().getAddress(str(s))
+    def get_func(self, id):
+        fm = currentProgram.getFunctionManager()
+        try: 
+            a = self.get_addr(id)
+            if a: return fm.getFunctionAt(a)
+        except: pass
+        for f in fm.getFunctions(True):
+            if f.getName() == id: return f
+        return None
+    def decompile(self, id):
+        f = self.get_func(id)
+        if not f: return 'Function not found'
+        di = DecompInterface()
+        di.openProgram(currentProgram)
+        res = di.decompileFunction(f, 30, monitor)
+        ret = res.getDecompiledFunction().getC() if res.isValid() else res.getErrorMessage()
+        di.dispose()
+        return ret
+    def get_refs_to(self, addr):
+        rm = currentProgram.getReferenceManager()
+        return [r.getFromAddress().toString() for r in rm.getReferencesTo(self.get_addr(addr))]
+    def set_comment(self, addr, text, type='eol'):
+        ct = {'eol': CommentType.EOL, 'pre': CommentType.PRE, 'post': CommentType.POST, 'plate': CommentType.PLATE}.get(type, CommentType.EOL)
+        currentProgram.getListing().setComment(self.get_addr(addr), ct, text)
+    def find_struct(self, name):
+        for dt in currentProgram.getDataTypeManager().getAllDataTypes():
+            if dt.getName() == name and 'Structure' in type(dt).__name__: return dt
+        return None
+    def read_bytes(self, addr, length):
+        try:
+            b = currentProgram.getMemory().getBytes(self.get_addr(addr), length)
+            return ''.join(['%02x' % (x & 0xff) for x in b])
+        except: return 'Error reading bytes'
+    def get_vt_matches(self, session=None, status=None):
+        '''Return list of {src, dst, status, similarity, confidence} dicts.
+        status: None=all, or one of ACCEPTED/REJECTED/AVAILABLE to filter.'''
+        if session is None: session = self.get_vt_session()
+        if not session: return []
+        results = []
+        for ms in session.getMatchSets():
+            for m in ms.getMatches():
+                assoc = m.getAssociation()
+                s = assoc.getStatus().name()
+                if status and s != status: continue
+                try: sim = m.getSimilarityScore().getScore()
+                except: sim = 0.0
+                try: conf = m.getConfidenceScore().getScore()
+                except: conf = 0.0
+                results.append({'src': str(assoc.getSourceAddress()), 'dst': str(assoc.getDestinationAddress()), 'status': s, 'similarity': sim, 'confidence': conf})
+        return results
+    def find_addr_in_version(self, addr, session=None):
+        '''Find the ACCEPTED destination address matching a source address in a VT session.
+        Returns the destination address string, or None if no accepted match found.'''
+        if session is None: session = self.get_vt_session()
+        if not session: return None
+        src = self.get_addr(addr)
+        for ms in session.getMatchSets():
+            for m in ms.getMatches():
+                assoc = m.getAssociation()
+                if assoc.getStatus().name() == 'ACCEPTED' and assoc.getSourceAddress() == src:
+                    return str(assoc.getDestinationAddress())
+        return None
+    def accept_vt_match(self, src_addr, session=None):
+        '''Accept the first AVAILABLE match for src_addr in the VT session.
+        Returns the destination address string, or None if nothing to accept.'''
+        if session is None: session = self.get_vt_session()
+        if not session: return None
+        src = self.get_addr(src_addr)
+        for ms in session.getMatchSets():
+            for m in ms.getMatches():
+                assoc = m.getAssociation()
+                if assoc.getSourceAddress() == src and assoc.getStatus().name() == 'AVAILABLE':
+                    try:
+                        session.updateAssociationStatus(assoc, assoc.getStatus().ACCEPTED)
+                        return str(assoc.getDestinationAddress())
+                    except Exception as e: print('accept error: ' + str(e))
+        return None
+    def list_vt_sessions(self):
+        '''Return a list of dicts describing open VT sessions: {name, src, dst, match_count}.'''
+        result = []
+        for sess in self.get_vt_sessions():
+            try:
+                count = sum(ms.getMatchCount() for ms in sess.getMatchSets())
+                result.append({'name': sess.getName(), 'src': sess.getSourceProgram().getName(), 'dst': sess.getDestinationProgram().getName(), 'match_count': count})
+            except Exception as e: result.append({'error': str(e)})
+        return result
+ghidra = GhidraHelpers()
+
+class DebuggerHelpers:
+    '''Debugger access. Call dbg.status() first to confirm a session is active.
+    Object graph: Trace → TraceThread → TraceMemoryRegisterSpace → RegisterValue
+                  Trace → TraceMemoryManager → getBytes(snap, addr, buf)
+    Snaps are integer time-points; use dbg.get_snap() for the current one.
+    Addresses: pass hex-string ('0x1234') or int; internal conversion via trace.getBaseAddressFactory().
+    '''
+    def _tool(self):
+        return state.getTool()
+    def _svc(self, cls_fqn):
+        try:
+            parts = cls_fqn.rsplit('.', 1)
+            import importlib
+            mod = importlib.import_module(parts[0])
+            cls = getattr(mod, parts[1])
+            return self._tool().getService(cls)
+        except: return None
+    def get_trace_manager(self):
+        '''DebuggerTraceManagerService — trace/thread lifecycle.'''
+        return self._svc('ghidra.app.services.DebuggerTraceManagerService')
+    def get_target_service(self):
+        '''DebuggerTargetService — get live Target for action dispatch.'''
+        return self._svc('ghidra.app.services.DebuggerTargetService')
+    def get_bp_service(self):
+        '''DebuggerLogicalBreakpointService — logical breakpoint CRUD.'''
+        return self._svc('ghidra.app.services.DebuggerLogicalBreakpointService')
+    def get_trace(self):
+        '''Active Trace object, or None if no debugger session.'''
+        tm = self.get_trace_manager()
+        return tm.getCurrentTrace() if tm else None
+    def get_thread(self):
+        '''Currently focused TraceThread, or None.'''
+        tm = self.get_trace_manager()
+        return tm.getCurrentThread() if tm else None
+    def get_snap(self):
+        '''Current snapshot index (long). Returns -1 if no session.'''
+        tm = self.get_trace_manager()
+        return tm.getCurrentSnap() if tm else -1
+    def get_threads(self):
+        '''List all TraceThread objects in the active trace.'''
+        trace = self.get_trace()
+        if not trace: return []
+        return list(trace.getThreadManager().getAllThreads())
+    def get_registers(self, thread=None, frame=0, snap=None):
+        '''Register values as {name: int} dict.
+        Reads from trace memory register space (no live refresh).
+        For live values call dbg.refresh_registers() first.'''
+        try:
+            if thread is None: thread = self.get_thread()
+            if snap is None: snap = self.get_snap()
+            if thread is None or snap < 0: return {'error': 'no active thread/snap'}
+            space = thread.getTrace().getMemoryManager().getMemoryRegisterSpace(thread, frame, False)
+            if not space: return {'error': 'no register space for thread'}
+            result = {}
+            for reg in thread.getTrace().getBaseLanguage().getRegisters():
+                if reg.isBaseRegister():
+                    try:
+                        val = space.getValue(snap, reg)
+                        if val: result[reg.getName()] = val.getUnsignedValue().longValue()
+                    except: pass
+            return result
+        except Exception as e: return {'error': str(e)}
+    def refresh_registers(self, thread=None, frame=0, snap=None):
+        '''Ask the live target to refresh register state into the trace (requires live session).'''
+        try:
+            if thread is None: thread = self.get_thread()
+            trace = thread.getTrace()
+            target = self.get_target_service().getTarget(trace)
+            if not target: return 'no target'
+            platform = trace.getPlatformManager().getCurrentPlatform()
+            if snap is None: snap = self.get_snap()
+            regs = set(trace.getBaseLanguage().getRegisters())
+            target.readRegisters(platform, thread, frame, regs)
+            return 'ok'
+        except Exception as e: return 'error: ' + str(e)
+    def read_memory(self, addr, length, snap=None):
+        '''Read `length` bytes at `addr` (hex str or int) from trace memory. Returns hex string.
+        For up-to-date bytes on a live target call refresh_memory(addr, length) first.'''
+        try:
+            trace = self.get_trace()
+            if snap is None: snap = self.get_snap()
+            if not trace or snap < 0: return 'no active trace'
+            af = trace.getBaseAddressFactory()
+            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            import java.nio.ByteBuffer as ByteBuffer
+            buf = ByteBuffer.allocate(length)
+            read = trace.getMemoryManager().getBytes(snap, a, buf)
+            buf.flip()
+            ba = buf.array()
+            return ''.join('%02x' % (b & 0xff) for b in ba[:read])
+        except Exception as e: return 'error: ' + str(e)
+    def refresh_memory(self, addr, length):
+        '''Ask the live target to read memory into the trace (requires live session).'''
+        try:
+            trace = self.get_trace()
+            target = self.get_target_service().getTarget(trace)
+            if not target: return 'no target'
+            af = trace.getBaseAddressFactory()
+            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            import ghidra.program.model.address.AddressSet as AddressSet
+            aset = AddressSet(a, a.add(length - 1))
+            target.readMemory(aset, monitor)
+            return 'ok'
+        except Exception as e: return 'error: ' + str(e)
+    def _do_action(self, action_name_field, thread=None):
+        '''Internal: dispatch a named action (RESUME/STEP_INTO/etc.) via Target.collectActions.
+        Mirrors FlatDebuggerAPI.doThreadAction / doTraceAction.'''
+        try:
+            from ghidra.debug.api.target import ActionName
+            from ghidra.debug.api.target import Target
+            name = getattr(ActionName, action_name_field)
+            if thread is None: thread = self.get_thread()
+            trace = self.get_trace()
+            if not trace: return 'no active trace'
+            target = self.get_target_service().getTarget(trace)
+            if not target: return 'no live target (trace may be read-only/emulation)'
+            from docking import DefaultActionContext
+            if thread is not None:
+                try:
+                    ctx = DefaultActionContext(None, thread.getObject(), None)
+                except:
+                    ctx = DefaultActionContext()
+            else:
+                ctx = DefaultActionContext()
+            policy = Target.ObjectArgumentPolicy.CURRENT_OBJECT_IF_APPLICABLE
+            actions = target.collectActions(name, ctx, policy)
+            if not actions:
+                return 'action ' + action_name_field + ' not available (wrong state?)'
+            for entry in actions.values():
+                entry.invoke(False)
+                return 'ok'
+        except Exception as e: return 'error: ' + str(e)
+    def resume(self, thread=None):
+        '''Resume execution of the current (or given) thread.'''
+        return self._do_action('RESUME', thread)
+    def interrupt(self, thread=None):
+        '''Suspend/interrupt the current (or given) thread.'''
+        return self._do_action('INTERRUPT', thread)
+    def step_into(self, thread=None):
+        '''Step into (single step) the current (or given) thread.'''
+        return self._do_action('STEP_INTO', thread)
+    def step_over(self, thread=None):
+        '''Step over the current (or given) thread.'''
+        return self._do_action('STEP_OVER', thread)
+    def step_out(self, thread=None):
+        '''Step out of the current function for the current (or given) thread.'''
+        return self._do_action('STEP_OUT', thread)
+    def kill(self, thread=None):
+        '''Kill the target process.'''
+        return self._do_action('KILL', thread)
+    def list_breakpoints(self):
+        '''List all logical breakpoints as list of {address, state, kinds, length} dicts.'''
+        try:
+            svc = self.get_bp_service()
+            if not svc: return [{'error': 'DebuggerLogicalBreakpointService not loaded'}]
+            result = []
+            for bp in svc.getAllBreakpoints():
+                try:
+                    result.append({
+                        'address': str(bp.getAddress()),
+                        'state': bp.computeState().name(),
+                        'kinds': str(bp.getKinds()),
+                        'length': bp.getLength(),
+                        'name': str(bp.getName()) if hasattr(bp, 'getName') else ''
+                    })
+                except Exception as e: result.append({'error': str(e)})
+            return result
+        except Exception as e: return [{'error': str(e)}]
+    def set_breakpoint(self, addr, length=1, name=''):
+        '''Place a software-execute breakpoint at addr in the current program.
+        addr: hex string or int. Returns ok/error string.
+        Requires a live target and static mapping between program and trace.'''
+        try:
+            from ghidra.app.services import DebuggerLogicalBreakpointService
+            from ghidra.trace.model.breakpoint import TraceBreakpointKind
+            svc = self.get_bp_service()
+            if not svc: return 'DebuggerLogicalBreakpointService not loaded'
+            prog_addr = currentProgram.getAddressFactory().getAddress(str(addr))
+            kinds = java.util.Set.of(TraceBreakpointKind.SW_EXECUTE)
+            future = svc.placeBreakpointAt(currentProgram, prog_addr, length, kinds, name)
+            future.get()
+            return 'ok: breakpoint at ' + str(addr)
+        except Exception as e: return 'error: ' + str(e)
+    def delete_breakpoints(self, addr):
+        '''Delete all logical breakpoints at addr in the current program.'''
+        try:
+            svc = self.get_bp_service()
+            if not svc: return 'DebuggerLogicalBreakpointService not loaded'
+            prog_addr = currentProgram.getAddressFactory().getAddress(str(addr))
+            bps = svc.getBreakpointsAt(currentProgram, prog_addr)
+            if not bps: return 'no breakpoints at ' + str(addr)
+            futures = [bp.delete() for bp in bps]
+            for f in futures: f.get()
+            return 'ok: deleted ' + str(len(futures)) + ' breakpoint(s) at ' + str(addr)
+        except Exception as e: return 'error: ' + str(e)
+    def get_stack(self, thread=None, snap=None):
+        '''Stack frames for the current (or given) thread as list of {level, pc} dicts.
+        pc is raw program-counter from the trace; use static mapping to resolve to symbols.'''
+        try:
+            if thread is None: thread = self.get_thread()
+            if snap is None: snap = self.get_snap()
+            if thread is None: return [{'error': 'no active thread'}]
+            stack = thread.getStack(snap)
+            if not stack: return []
+            result = []
+            for i, frame in enumerate(stack.getFrames()):
+                result.append({'level': i, 'pc': hex(frame.getProgramCounter())})
+            return result
+        except Exception as e: return [{'error': str(e)}]
+    def write_register(self, name, value, thread=None, frame=0, snap=None):
+        '''Write a register value (int) for the current thread via StateEditor.
+        Requires RW control mode (live target or emulation mode).'''
+        try:
+            from ghidra.app.services import DebuggerControlService
+            from ghidra.program.model.lang import RegisterValue
+            import java.math.BigInteger as BigInteger
+            if thread is None: thread = self.get_thread()
+            if snap is None: snap = self.get_snap()
+            trace = thread.getTrace()
+            reg = trace.getBaseLanguage().getRegister(name)
+            if not reg: return 'register not found: ' + name
+            rv = RegisterValue(reg, BigInteger.valueOf(value))
+            ctrl_svc = self._svc('ghidra.app.services.DebuggerControlService')
+            tm = self.get_trace_manager()
+            coords = tm.getCurrent()
+            editor = ctrl_svc.createStateEditor(coords)
+            editor.setRegister(rv).get()
+            return 'ok'
+        except Exception as e: return 'error: ' + str(e)
+    def write_memory(self, addr, hex_bytes):
+        '''Write bytes (hex string) to live target memory via StateEditor.
+        Requires RW control mode.'''
+        try:
+            trace = self.get_trace()
+            if not trace: return 'no active trace'
+            af = trace.getBaseAddressFactory()
+            a = af.getDefaultAddressSpace().getAddress(addr if isinstance(addr, int) else int(str(addr), 16))
+            raw = bytes(int(hex_bytes[i:i+2], 16) for i in range(0, len(hex_bytes), 2))
+            ctrl_svc = self._svc('ghidra.app.services.DebuggerControlService')
+            tm = self.get_trace_manager()
+            editor = ctrl_svc.createStateEditor(tm.getCurrent())
+            import jarray
+            ba = jarray.array([(b if b < 128 else b - 256) for b in raw], 'b')
+            editor.setVariable(a, ba).get()
+            return 'ok'
+        except Exception as e: return 'error: ' + str(e)
+    def status(self):
+        '''Summary dict of current debugger state. Check connected=True before other calls.'''
+        try:
+            trace = self.get_trace()
+            if not trace:
+                return {'connected': False, 'hint': 'Run `debugger status` for more details'}
+            tm = self.get_trace_manager()
+            thread = tm.getCurrentThread()
+            snap = tm.getCurrentSnap()
+            threads = self.get_threads()
+            target_svc = self.get_target_service()
+            target = target_svc.getTarget(trace) if target_svc else None
+            return {
+                'connected': True,
+                'trace': trace.getName(),
+                'snap': snap,
+                'thread': str(thread) if thread else None,
+                'thread_count': len(threads),
+                'has_live_target': target is not None,
+                'control_mode': str(self._svc('ghidra.app.services.DebuggerControlService').getCurrentMode(trace)) if self._svc('ghidra.app.services.DebuggerControlService') else 'unknown'
+            }
+        except Exception as e: return {'connected': False, 'error': str(e)}
+dbg = DebuggerHelpers()
+
+class REngHelpers:
+    '''Platform-agnostic reverse engineering utilities. Works best with dbg connected.
+    Workflow: reng.image_base() → reng.rtti(ptr) → reng.explore(ptr) → reng.define_struct(...)
+    MSVC x64 RTTI layout: obj[0]=vtable_ptr, vtable[-8]=RTTICompleteObjectLocator (COL),
+      COL+0=sig(1), COL+12=TypeDescriptor_RVA, TypeDescriptor+16=mangled_name(.?AV<class>@@)
+    '''
+    _image_base_cache = None
+    _vtable_cache = None
+
+    def image_base(self):
+        '''Runtime image base of currentProgram binary. Inferred from debugger thread names.
+        Returns int or None if no debugger session.'''
+        if self._image_base_cache: return self._image_base_cache
+        import re as _re
+        prog_name = currentProgram.getName().replace('.exe','') if currentProgram else ''
+        static_base = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
+        try:
+            for t in dbg.get_threads():
+                name = t.getName(0)
+                # Match: ModuleName!FuncName+0xOFF (0xADDR) or similar WinDbg format
+                m = _re.search(r'%s![^+\s]+\+0x([0-9a-fA-F]+)\s+\(([0-9a-fA-F`]+)\)' % _re.escape(prog_name), name, _re.I)
+                if not m:
+                    m = _re.search(r'%s!([^+\s]+)\+0x([0-9a-fA-F]+)' % _re.escape(prog_name), name, _re.I)
+                if m:
+                    groups = m.groups()
+                    offset = int(groups[-2], 16)
+                    rt_pc  = int(groups[-1].replace('`',''), 16)
+                    rt_fn  = rt_pc - offset
+                    # Find the static function address from the display name
+                    full = name
+                    fn_m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))' % _re.escape(prog_name), full, _re.I)
+                    if fn_m:
+                        static_fn = int(fn_m.group(2), 16)
+                        self._image_base_cache = rt_fn - (static_fn - static_base)
+                        return self._image_base_cache
+        except Exception as e: pass
+        return None
+
+    def to_rt(self, static_addr):
+        '''Convert static Ghidra address to runtime address (applies ASLR offset).'''
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
+        return static_addr - sb + ib if ib else None
+
+    def to_static(self, rt_addr):
+        '''Convert runtime address to static Ghidra address (removes ASLR offset).'''
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
+        return rt_addr - ib + sb if ib else None
+
+    def _read_mem_static(self, static_addr, n):
+        '''Read n bytes from static Ghidra program memory. Returns bytes or None.'''
+        try:
+            mem = currentProgram.getMemory()
+            ds  = currentProgram.getAddressFactory().getDefaultAddressSpace()
+            a   = ds.getAddress(static_addr)
+            buf = bytearray(n)
+            for i in range(n): buf[i] = mem.getByte(a.add(i)) & 0xff
+            return bytes(buf)
+        except: return None
+
+    def _read_rt(self, rt_addr, n):
+        '''Read n bytes from live trace memory. Returns bytes or None.'''
+        try:
+            hex_data = dbg.read_memory(rt_addr, n)
+            if 'error' in hex_data: return None
+            return bytes.fromhex(hex_data[:n*2])
+        except: return None
+
+    def rtti(self, rt_obj_ptr):
+        '''Decode MSVC x64 RTTI class name from a live object pointer.
+        Reads vtable ptr at [obj], then COL at vtable[-8], then TypeDescriptor.
+        Returns class name string or None.'''
+        import re as _re, struct as _st
+        try:
+            # Read vtable pointer at offset 0 of object
+            b = self._read_rt(rt_obj_ptr, 8)
+            if not b: return None
+            vtable_rt = _st.unpack_from('<Q', b)[0]
+            # Read COL pointer at vtable[-8]
+            b = self._read_rt(vtable_rt - 8, 8)
+            if not b: return None
+            col_rt = _st.unpack_from('<Q', b)[0]
+            # Convert COL to static and read from program memory
+            col_static = self.to_static(col_rt)
+            if not col_static: return None
+            col_bytes = self._read_mem_static(col_static, 24)
+            if not col_bytes or len(col_bytes) < 24: return None
+            sig = _st.unpack_from('<I', col_bytes, 0)[0]
+            if sig != 1: return None  # not x64 COL
+            td_rva = _st.unpack_from('<I', col_bytes, 12)[0]
+            sb = currentProgram.getImageBase().getOffset()
+            td_static = sb + td_rva
+            # TypeDescriptor+16 = mangled name
+            name_bytes = self._read_mem_static(td_static + 16, 128)
+            if not name_bytes: return None
+            name = name_bytes.split(b'\x00')[0].decode('ascii', errors='replace')
+            m = _re.match(r'\.\?A[VUW]([^@]+)@', name)
+            return m.group(1) if m else name
+        except: return None
+
+    def _find_dt(self, class_name):
+        '''Find a StructureDataType by name in Ghidra's DTM. Returns DataType or None.'''
+        if not class_name or not currentProgram: return None
+        for dt in currentProgram.getDataTypeManager().getAllDataTypes():
+            if dt.getName() == class_name and hasattr(dt, 'getComponents'):
+                return dt
+        return None
+
+    def _flatten_struct(self, class_name, base_offset=0, visited=None):
+        '''Recursively walk a struct and its embedded base classes.
+        Returns {absolute_offset: (fname, size, comment, from_class)} for ALL fields
+        including inherited ones. This is how explore() shows inherited field names.'''
+        if visited is None: visited = set()
+        if class_name in visited: return {}
+        visited.add(class_name)
+        dt = self._find_dt(class_name)
+        if dt is None: return {}
+        result = {}
+        for comp in dt.getComponents():
+            fname = comp.getFieldName() or ''
+            abs_off = base_offset + comp.getOffset()
+            sub_dt = comp.getDataType()
+            # Recurse into embedded base class structs (field name ends with '_base')
+            if fname.endswith('_base') and hasattr(sub_dt, 'getComponents'):
+                sub_fields = self._flatten_struct(sub_dt.getName(), abs_off, visited)
+                result.update(sub_fields)
+            elif fname:  # skip padding/unnamed
+                result[abs_off] = (fname, comp.getLength(), comp.getComment() or '', class_name)
+        return result
+
+    def _load_ghidra_struct(self, class_name):
+        '''Look up class_name in Ghidra DTM, flattening inherited fields from embedded base classes.
+        Returns {absolute_offset: (fname, size, comment, from_class)} or {}.'''
+        return self._flatten_struct(class_name)
+
+    def explore(self, rt_addr, size=256):
+        '''ReClass.NET-style live struct explorer — backed by Ghidra's DataTypeManager.
+        If Ghidra already has a struct defined for this class (via reng.define_struct or
+        imported headers), known field names are shown at their offsets automatically.
+        Unknown offsets show raw type inference (ptr/RTTI/f32/int).
+        Pointer fields show RTTI class name of the pointed-to object.
+        Returns formatted table. Use follow()/tree() to drill into sub-objects.'''
+        import struct as _st
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0
+        fm = currentProgram.getFunctionManager() if currentProgram else None
+        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None
+        dbg.refresh_memory(rt_addr, size)
+        raw = self._read_rt(rt_addr, size)
+        if not raw: return 'Error: could not read 0x%x' % rt_addr
+        rtti_name = self.rtti(rt_addr)
+        # Look up existing Ghidra struct definition for this class
+        known_fields = self._load_ghidra_struct(rtti_name)
+        has_known = len(known_fields) > 0
+        header_note = ' [%d known fields from Ghidra DTM]' % len(known_fields) if has_known else ' [no struct defined yet — use reng.define_struct to record discoveries]'
+        lines = ['=== 0x%x  (%s)  %d bytes%s ===' % (rt_addr, rtti_name or '?', len(raw), header_note),
+                 '%-6s %-16s %-22s %-18s  %s' % ('Off','Hex(LE)','Field/Ptr','Value','Note')]
+        # Track which offsets are covered by known fields to skip their bytes
+        covered = set()
+        for off, (fname, sz, comment, from_cls) in sorted(known_fields.items()):
+            for i in range(sz): covered.add(off + i)
+        off = 0
+        while off < len(raw) - 3:
+            # Check if this offset has a known field definition (including inherited)
+            if off in known_fields:
+                fname, sz, comment, from_cls = known_fields[off]
+                chunk = raw[off:off+min(sz,8)]
+                import struct as _st2
+                val_str = ''
+                if sz == 4: val_str = 'i32=%d / f32=%.4g' % (_st2.unpack_from('<i',chunk)[0], _st2.unpack_from('<f',chunk)[0])
+                elif sz == 8: val_str = 'u64=0x%x' % _st2.unpack_from('<Q',chunk)[0]
+                elif sz == 1: val_str = 'u8=%d' % chunk[0]
+                elif sz == 2: val_str = 'u16=%d' % _st2.unpack_from('<H',chunk)[0]
+                else: val_str = chunk.hex()[:16]
+                inherited = ' (from %s)' % from_cls if from_cls != rtti_name else ''
+                lines.append('+%-5x %-16s %-22s %-18s  KNOWN%s: %s%s' % (
+                    off, chunk.hex()[:16], fname, val_str, inherited, comment, ' (sz=%d)'%sz if sz!=8 else ''))
+                off += sz
+                continue
+            # Unknown field — infer type for 8-byte slot
+            if off + 8 > len(raw): break
+            chunk = raw[off:off+8]
+            u64   = _st.unpack_from('<Q', chunk)[0]
+            i32   = _st.unpack_from('<i', chunk[:4])[0]
+            f32   = _st.unpack_from('<f', chunk[:4])[0]
+            note  = ''
+            field_str = ''
+            val_str   = ''
+            if u64 == 0:
+                note = 'null'
+                val_str = '0'
+            elif ib and ib <= u64 < ib + 0x10000000:
+                static = u64 - ib + sb
+                try:
+                    fn = fm.getFunctionAt(ds.getAddress(static)) if fm else None
+                    if fn:
+                        field_str = fn.getName(True)[:22]
+                        note = 'fn-ptr'
+                    elif off == 0:
+                        note = 'vtable → %s' % (rtti_name or '?')
+                    else:
+                        sub_rtti = self.rtti(u64)
+                        field_str = ('(%s*)' % sub_rtti if sub_rtti else 'ptr')[:22]
+                        note = 'ptr→%s*' % (sub_rtti or 'SkyrimSE')
+                        sub_known = self._load_ghidra_struct(sub_rtti)
+                        if sub_known: note += ' [%d known fields]' % len(sub_known)
+                except: field_str = ('0x%x'%u64)[:22]
+                val_str = '0x%x' % u64
+            elif 0x7f0000000000 <= u64 <= 0x7fffffffffff:
+                val_str = '0x%x' % u64
+                note = 'ptr→DLL/heap'
+            elif 0 < u64 < 0x10000:
+                note = 'small_int=%d' % u64
+                val_str = str(u64)
+            elif abs(f32) > 1e-10 and abs(f32) < 1e8 and f32 == f32:
+                note = 'f32≈%.5g' % f32
+                val_str = '%.5g' % f32
+            else:
+                val_str = 'i32=%d' % i32
+            lines.append('+%-5x %-16s %-22s %-18s  %s' % (
+                off, chunk.hex()[:16], field_str[:22], val_str[:18], note))
+            off += 8
+        return '\n'.join(lines)
+
+    def read_struct(self, rt_addr, fields):
+        '''Read named fields from a live object at rt_addr.
+        fields = {name: (offset, type_str)}
+        type_str: u8/u16/u32/u64/i8/i16/i32/i64/f32/f64/ptr/cstr/wstr
+        Returns {name: value} dict. Example:
+          reng.read_struct(player_ptr, {"health":(0x54,"f32"), "pos_x":(0xD0,"f32")})
+        '''
+        import struct as _st
+        fmt = {'u8':('<B',1),'u16':('<H',2),'u32':('<I',4),'u64':('<Q',8),
+               'i8':('<b',1),'i16':('<h',2),'i32':('<i',4),'i64':('<q',8),
+               'f32':('<f',4),'f64':('<d',8),'ptr':('<Q',8)}
+        result = {}
+        for name, (off, typ) in fields.items():
+            addr = rt_addr + off
+            if typ in ('cstr', 'wstr'):
+                ptr_raw = self._read_rt(addr, 8)
+                ptr = _st.unpack_from('<Q', ptr_raw)[0] if ptr_raw else 0
+                if ptr:
+                    s_raw = self._read_rt(ptr, 128)
+                    if s_raw:
+                        if typ == 'wstr': result[name] = s_raw.decode('utf-16-le', errors='replace').split('\x00')[0]
+                        else: result[name] = s_raw.split(b'\x00')[0].decode('utf-8', errors='replace')
+                    else: result[name] = None
+                else: result[name] = None
+            elif typ in fmt:
+                f, sz = fmt[typ]
+                b = self._read_rt(addr, sz)
+                result[name] = _st.unpack(f, b)[0] if b else None
+            else: result[name] = 'unknown type: ' + typ
+        return result
+
+    def define_struct(self, name, fields, category='/'):
+        '''Create or update a StructureDataType in Ghidra's data type manager.
+        fields = {field_name: (offset, size, comment)}
+        If a struct with this name already exists, existing named fields are PRESERVED
+        and only new/overlapping fields from `fields` are added/updated.
+        Returns the StructureDataType or error string.
+        Tip: call with fields={} to inspect an existing struct definition.'''
+        from ghidra.program.model.data import StructureDataType, CategoryPath, DataTypeConflictHandler
+        from ghidra.program.model.data import ByteDataType, DWordDataType, QWordDataType, FloatDataType, Undefined
+        dtm = currentProgram.getDataTypeManager()
+        cat = CategoryPath(category)
+        size_to_dt = {1: ByteDataType.dataType, 2: Undefined.getUndefinedDataType(2),
+                      4: DWordDataType.dataType, 8: QWordDataType.dataType}
+        # Check for existing struct
+        existing = None
+        for dt in dtm.getAllDataTypes():
+            if dt.getName() == name and hasattr(dt, 'getComponents'):
+                existing = dt
+                break
+        if existing is not None and not fields:
+            # Inspection mode: return summary of existing struct
+            lines = ['Existing struct %s (%d bytes):' % (name, existing.getLength())]
+            for comp in existing.getComponents():
+                fname = comp.getFieldName() or ''
+                lines.append('  +0x%x  %-4d  %-20s  %s' % (
+                    comp.getOffset(), comp.getLength(),
+                    fname, comp.getComment() or ''))
+            return '\n'.join(lines)
+        # Build merged field map: start from existing, override/add with new fields
+        merged = {}  # offset -> (fname, size, comment)
+        if existing is not None:
+            for comp in existing.getComponents():
+                fname = comp.getFieldName()
+                if fname:  # only preserve named fields
+                    merged[comp.getOffset()] = (fname, comp.getLength(), comp.getComment() or '')
+        for fname, (off, sz, comment) in fields.items():
+            merged[off] = (fname, sz, comment)
+        # Determine struct size
+        if merged:
+            total = max(off + sz for off, (_, sz, _) in merged.items())
+        elif existing:
+            total = existing.getLength()
+        else:
+            total = 1
+        st2 = StructureDataType(cat, name, total, dtm)
+        for off, (fname, sz, comment) in sorted(merged.items()):
+            dt = size_to_dt.get(sz, ByteDataType.dataType)
+            try: st2.insertAtOffset(off, dt, sz, fname, comment)
+            except: pass
+        tx = currentProgram.startTransaction('define_struct: ' + name)
+        try:
+            result = dtm.addDataType(st2, DataTypeConflictHandler.REPLACE_HANDLER)
+            currentProgram.endTransaction(tx, True)
+            return result
+        except Exception as e:
+            currentProgram.endTransaction(tx, False)
+            return 'error: ' + str(e)
+
+    def scan_vtables(self, prog=None):
+        '''Scan RTTI in .rdata and return {vtable_static_addr: class_name}.
+        Uses native Memory.findBytes — fast. Results are cached after first call.
+        Equivalent to scanning for all MSVC class vtables in a PE binary.'''
+        if self._vtable_cache: return self._vtable_cache
+        import re as _re
+        import ghidra.util.task.TaskMonitor as _TM
+        import struct as _st
+        p   = prog or currentProgram
+        mem = p.getMemory()
+        ds  = p.getAddressFactory().getDefaultAddressSpace()
+        rm  = p.getReferenceManager()
+        sb  = p.getImageBase().getOffset()
+        # Use shared helpers (bound to `p` which may differ from currentProgram)
+        def r32(a):
+            try:
+                addr = ds.getAddress(a); b = bytearray(4)
+                for i in range(4): b[i] = mem.getByte(addr.add(i)) & 0xff
+                return _st.unpack('<I', bytes(b))[0]
+            except: return None
+        def rstr(a):
+            try:
+                addr = ds.getAddress(a); s = []
+                for i in range(128):
+                    c = mem.getByte(addr.add(i)) & 0xff
+                    if c == 0: break
+                    s.append(chr(c))
+                return ''.join(s)
+            except: return ''
+        rdata = next((b for b in mem.getBlocks() if b.getName() == '.rdata'), None)
+        if not rdata: return {}
+        cols = {}
+        search = rdata.getStart()
+        end    = rdata.getEnd()
+        while True:
+            hit = mem.findBytes(search, bytes([1,0,0,0]), None, True, _TM.DUMMY)
+            if hit is None or hit.compareTo(end) >= 0: break
+            a = hit.getOffset()
+            self_rva = r32(a + 20)
+            if self_rva and sb + self_rva == a:
+                td_rva = r32(a + 12)
+                if td_rva:
+                    name = rstr(sb + td_rva + 16)
+                    if name.startswith('.?'):
+                        m = _re.match(r'\.\?A[VUW]([^@]+)@', name)
+                        cols[a] = m.group(1) if m else name
+            search = ds.getAddress(a + 4)
+        vtmap = {}
+        for col_addr, class_name in cols.items():
+            col_ghidra = ds.getAddress(col_addr)
+            for ref in rm.getReferencesTo(col_ghidra):
+                vtmap[ref.getFromAddress().getOffset() + 8] = class_name
+        self._vtable_cache = vtmap
+        return vtmap
+
+    def rename_vfuncs(self, vtable_map=None, dry_run=False):
+        '''Bulk-rename FUN_* functions using vtable map from scan_vtables().
+        Assigns Class::vfunc_N names. Skips already-named functions.
+        Returns {renamed: N, skipped: N, errors: N}.'''
+        import re as _re
+        from ghidra.program.model.symbol import SourceType
+        vtmap = vtable_map or self.scan_vtables()
+        p   = currentProgram
+        mem = p.getMemory()
+        ds  = p.getAddressFactory().getDefaultAddressSpace()
+        fm  = p.getFunctionManager()
+        st2 = p.getSymbolTable()
+        import struct as _st2
+        def r64(a):
+            try:
+                addr = ds.getAddress(a); b = bytearray(8)
+                for i in range(8): b[i] = mem.getByte(addr.add(i)) & 0xff
+                return _st2.unpack('<Q', bytes(b))[0]
+            except: return None
+        renamed = skipped = errors = 0
+        tx = p.startTransaction('reng.rename_vfuncs') if not dry_run else None
+        try:
+            for vt, class_name in vtmap.items():
+                ns_name = _re.sub(r'[<>$,\s]', '_', class_name)[:64]
+                try:
+                    ns = st2.getNamespace(ns_name, p.getGlobalNamespace())
+                    if ns is None and not dry_run:
+                        ns = st2.createNameSpace(p.getGlobalNamespace(), ns_name, SourceType.ANALYSIS)
+                except: skipped += 1; continue
+                idx = 0
+                ptr = vt
+                while idx < 512:
+                    fn_addr = r64(ptr)
+                    if not fn_addr: break
+                    sb = p.getImageBase().getOffset()
+                    if fn_addr < sb or fn_addr > sb + 0x10000000: break
+                    fn = fm.getFunctionAt(ds.getAddress(fn_addr))
+                    if fn is None: break
+                    cur = fn.getName()
+                    if cur.startswith('FUN_') or cur.startswith('thunk_FUN_'):
+                        if not dry_run:
+                            try: fn.setName('vfunc_%d' % idx, SourceType.ANALYSIS); fn.setParentNamespace(ns); renamed += 1
+                            except: errors += 1
+                        else: renamed += 1
+                    else:
+                        skipped += 1
+                        if not dry_run:
+                            try:
+                                if fn.getParentNamespace().isGlobal(): fn.setParentNamespace(ns)
+                            except: pass
+                    ptr += 8; idx += 1
+            if tx is not None: p.endTransaction(tx, True)
+        except Exception as e:
+            if tx is not None: p.endTransaction(tx, False)
+            return {'error': str(e)}
+        return {'renamed': renamed, 'skipped': skipped, 'errors': errors}
+
+    def follow(self, rt_addr, offset, size=256):
+        '''Follow a pointer at [rt_addr+offset] and explore the pointed-to object.
+        Core ReClass.NET workflow: see a candidate ptr in explore(), follow it here.
+        Returns explore() output for the sub-object, or error string.'''
+        import struct as _st
+        b = self._read_rt(rt_addr + offset, 8)
+        if not b: return 'Error: could not read ptr at 0x%x+0x%x' % (rt_addr, offset)
+        sub_ptr = _st.unpack_from('<Q', b)[0]
+        if sub_ptr == 0: return 'Null pointer at offset 0x%x' % offset
+        print('Following ptr @ +0x%x: 0x%x -> 0x%x' % (offset, rt_addr + offset, sub_ptr))
+        return self.explore(sub_ptr, size)
+
+    def as_array(self, rt_addr, offset, count, type_str='f32'):
+        '''Read `count` consecutive values of `type_str` starting at rt_addr+offset.
+        Useful for: XYZ positions (3xf32), rotation matrices (9xf32), arrays of IDs (Nxu32).
+        type_str: f32/f64/u8/u16/u32/u64/i32/i64/ptr
+        Example: reng.as_array(actor_ptr, 0xD0, 3, "f32") → [x, y, z]'''
+        import struct as _st
+        fmt_map = {'f32':('<f',4),'f64':('<d',8),'u8':('<B',1),'u16':('<H',2),
+                   'u32':('<I',4),'u64':('<Q',8),'i32':('<i',4),'i64':('<q',8),'ptr':('<Q',8)}
+        if type_str not in fmt_map: return 'Unknown type: ' + type_str
+        fmt, sz = fmt_map[type_str]
+        total = count * sz
+        raw = self._read_rt(rt_addr + offset, total)
+        if not raw: return 'Error reading %d bytes at 0x%x+0x%x' % (total, rt_addr, offset)
+        result = [_st.unpack_from(fmt, raw, i*sz)[0] for i in range(count)]
+        return result
+
+    def diff(self, rt_addr1, rt_addr2, size=256, threshold=0):
+        '''Compare two struct instances field-by-field to find which offsets differ.
+        Key ReClass.NET technique: find two objects of the same class (e.g. two Actors),
+        change one (take damage, move), diff them → differing offsets = health/position/etc.
+        Returns list of {offset, val1, val2, delta} for differing 8-byte slots.'''
+        import struct as _st
+        dbg.refresh_memory(rt_addr1, size)
+        dbg.refresh_memory(rt_addr2, size)
+        raw1 = self._read_rt(rt_addr1, size)
+        raw2 = self._read_rt(rt_addr2, size)
+        if not raw1 or not raw2: return 'Error reading memory'
+        diffs = []
+        n = min(len(raw1), len(raw2))
+        for off in range(0, n - 7, 8):
+            v1 = _st.unpack_from('<Q', raw1, off)[0]
+            v2 = _st.unpack_from('<Q', raw2, off)[0]
+            if v1 != v2:
+                delta = abs(v2 - v1) if v2 >= v1 else abs(v1 - v2)
+                if delta > threshold:
+                    f1 = _st.unpack_from('<f', raw1, off)[0]
+                    f2 = _st.unpack_from('<f', raw2, off)[0]
+                    diffs.append({'offset': off, 'hex_off': '+0x%x' % off,
+                                  'val1': v1, 'val2': v2, 'delta': delta,
+                                  'as_f32_1': f1, 'as_f32_2': f2})
+        print('Diff 0x%x vs 0x%x: %d differing slots out of %d' % (rt_addr1, rt_addr2, len(diffs), n//8))
+        return diffs
+
+    def class_hierarchy(self, rt_ptr):
+        '''Decode full MSVC RTTI inheritance chain for a live object.
+        Returns ordered list of {class, offset, bases} from most-derived to base.
+        NOTE: RTTI stores class NAMES and BASE OFFSETS, not vfunc names.
+        Use vtable_methods() to see the actual virtual functions by slot.'''
+        import struct as _st
+        try:
+            b = self._read_rt(rt_ptr, 8)
+            if not b: return [{'error': 'cannot read object'}]
+            vtable_rt = _st.unpack_from('<Q', b)[0]
+            b2 = self._read_rt(vtable_rt - 8, 8)
+            if not b2: return [{'error': 'cannot read vtable[-8]'}]
+            col_rt = _st.unpack_from('<Q', b2)[0]
+            col_static = self.to_static(col_rt)
+            if not col_static: return [{'error': 'address conversion failed'}]
+            col_bytes = self._read_mem_static(col_static, 24)
+            if not col_bytes or col_bytes[0] != 1: return [{'error': 'invalid COL'}]
+            sb = currentProgram.getImageBase().getOffset()
+            # RTTIClassHierarchyDescriptor RVA is at COL+16
+            chd_rva  = _st.unpack_from('<I', col_bytes, 16)[0]
+            chd_static = sb + chd_rva
+            chd_bytes  = self._read_mem_static(chd_static, 12)
+            if not chd_bytes: return [{'error': 'cannot read CHD'}]
+            num_bases  = _st.unpack_from('<I', chd_bytes, 8)[0]
+            bca_rva    = _st.unpack_from('<I', chd_bytes, 4)[0]  # wait, offset 4 is attrs, 8 is numBases
+            # CHD layout: +0=sig, +4=attrs, +8=numBases, +12=pBaseClassArray(RVA)
+            chd_bytes12 = self._read_mem_static(chd_static, 16)
+            num_bases   = _st.unpack_from('<I', chd_bytes12, 8)[0]
+            bca_rva     = _st.unpack_from('<I', chd_bytes12, 12)[0]
+            bca_static  = sb + bca_rva
+            result = []
+            import re as _re
+            for i in range(min(num_bases, 64)):
+                bcd_rva   = self._read_mem_static(bca_static + i * 4, 4)
+                if not bcd_rva: break
+                bcd_static = sb + _st.unpack_from('<I', bcd_rva)[0]
+                bcd_bytes  = self._read_mem_static(bcd_static, 28)
+                if not bcd_bytes: break
+                td_rva  = _st.unpack_from('<I', bcd_bytes, 0)[0]
+                mdisp   = _st.unpack_from('<i', bcd_bytes, 8)[0]   # offset within object
+                name_bytes = self._read_mem_static(sb + td_rva + 16, 128)
+                if not name_bytes: continue
+                raw_name = name_bytes.split(b'\x00')[0].decode('ascii', errors='replace')
+                m = _re.match(r'\.\?A[VUW]([^@]+)@', raw_name)
+                class_name = m.group(1) if m else raw_name
+                result.append({'class': class_name, 'offset': mdisp, 'index': i})
+            return result
+        except Exception as e: return [{'error': str(e)}]
+
+    def vtable_methods(self, rt_ptr, max_vfuncs=128):
+        '''List virtual functions in the vtable of a live object.
+        Shows slot index, runtime addr, static addr, and current Ghidra name.
+        NOTE: RTTI gives class/hierarchy names only. Vfunc NAMES come from:
+          - Ghidra analysis / prior renaming (e.g. from reng.rename_vfuncs())
+          - SKSE/CommonLibSSE header imports applied to the project
+          - Manual identification via dynamic tracing
+        Returns list of {slot, rt_addr, static_addr, name, named} dicts.'''
+        import struct as _st
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0
+        fm = currentProgram.getFunctionManager() if currentProgram else None
+        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None
+        try:
+            b = self._read_rt(rt_ptr, 8)
+            vtable_rt = _st.unpack_from('<Q', b)[0]
+            rtti_name = self.rtti(rt_ptr)
+            print('vtable @ 0x%x  class=%s' % (vtable_rt, rtti_name or '?'))
+            result = []
+            for i in range(max_vfuncs):
+                fn_bytes = self._read_rt(vtable_rt + i * 8, 8)
+                if not fn_bytes: break
+                fn_rt = _st.unpack_from('<Q', fn_bytes)[0]
+                if ib and not (ib <= fn_rt < ib + 0x10000000): break
+                fn_static = fn_rt - ib + sb if ib else fn_rt
+                name = '???'
+                named = False
+                if fm and ds:
+                    try:
+                        fn = fm.getFunctionAt(ds.getAddress(fn_static))
+                        if fn:
+                            name = fn.getName(True)  # include namespace
+                            named = not fn.getName().startswith('FUN_')
+                    except: pass
+                result.append({'slot': i, 'rt': hex(fn_rt), 'static': hex(fn_static),
+                               'name': name, 'named': named})
+            named_count = sum(1 for r in result if r['named'])
+            print('%d vfuncs, %d named, %d unnamed' % (len(result), named_count, len(result)-named_count))
+            return result
+        except Exception as e: return [{'error': str(e)}]
+
+    def _scripts_dir(self):
+        '''Return the primary user Ghidra scripts directory path.'''
+        try:
+            from ghidra.app.script import GhidraScriptUtil
+            dirs = GhidraScriptUtil.getScriptSourceDirectories()
+            if dirs: return str(dirs[0])
+        except: pass
+        import os
+        return os.path.join(os.path.expanduser('~'), 'ghidra_scripts')
+
+    def save_script(self, name, code, category='MCP', description=''):
+        '''Save a Python script to the Ghidra scripts directory so it appears in Script Manager.
+        name: filename without path (e.g. "FindActors.py")
+        code: the Python script content
+        category: Script Manager category (default "MCP")
+        description: short description shown in Script Manager
+        Scripts must be runnable as GhidraScripts — use currentProgram, monitor, etc.
+        Prepends @category/@description metadata if not already present.
+        Returns the full path written.'''
+        import os
+        scripts_dir = self._scripts_dir()
+        if not os.path.isdir(scripts_dir):
+            os.makedirs(scripts_dir, exist_ok=True)
+        # Prepend script metadata if not present
+        header = ''
+        if '@category' not in code:
+            header += '# @category %s\n' % category
+        if description and '@description' not in code:
+            header += '# @description %s\n' % description
+        if not name.endswith('.py'): name += '.py'
+        full_path = os.path.join(scripts_dir, name)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(header + code)
+        print('Script saved: %s' % full_path)
+        print('Reload scripts in Ghidra: Script Manager > Refresh (green arrow)')
+        return full_path
+
+    def load_script(self, name):
+        '''Read and return the content of a script from the scripts directory.
+        Use to review or edit-then-save existing scripts.'''
+        import os
+        if not name.endswith('.py'): name += '.py'
+        path = os.path.join(self._scripts_dir(), name)
+        if not os.path.exists(path): return 'Script not found: %s' % path
+        with open(path, 'r', encoding='utf-8') as f: return f.read()
+
+    def list_scripts(self, pattern=None):
+        '''List scripts in the Ghidra scripts directory.
+        pattern: optional substring filter on filename.
+        Returns list of {name, path, category, description} dicts.'''
+        import os, re as _re
+        scripts_dir = self._scripts_dir()
+        result = []
+        if not os.path.isdir(scripts_dir): return []
+        for fname in sorted(os.listdir(scripts_dir)):
+            if not fname.endswith('.py'): continue
+            if pattern and pattern.lower() not in fname.lower(): continue
+            fpath = os.path.join(scripts_dir, fname)
+            cat = desc = ''
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        if not line.startswith('#'): break
+                        m = _re.match(r'#\s*@category\s+(.*)', line)
+                        if m: cat = m.group(1).strip()
+                        m = _re.match(r'#\s*@description\s+(.*)', line)
+                        if m: desc = m.group(1).strip()
+            except: pass
+            result.append({'name': fname, 'path': fpath, 'category': cat, 'description': desc})
+        return result
+
+    def run_script(self, name):
+        '''Execute an existing script from the scripts directory in the current Ghidra context.
+        Equivalent to running it from Script Manager but called from MCP.
+        Output is captured and returned.'''
+        import os, io
+        from ghidra.app.script import GhidraScriptUtil
+        from generic.jar import ResourceFile
+        from ghidra.app.script import GhidraState
+        from ghidra.app.script import ScriptControls
+        from ghidra.util.task import TaskMonitor
+        if not name.endswith('.py'): name += '.py'
+        path = os.path.join(self._scripts_dir(), name)
+        if not os.path.exists(path): return 'Script not found: %s' % path
+        resource = ResourceFile(java.io.File(path))
+        provider = GhidraScriptUtil.getProvider(resource)
+        if not provider: return 'No script provider for: %s' % name
+        import java.io.PrintWriter as PrintWriter
+        import java.io.StringWriter as StringWriter
+        sw = StringWriter()
+        pw = PrintWriter(sw)
+        script_instance = provider.getScriptInstance(resource, pw)
+        script_instance.execute(state, ScriptControls(pw, pw, TaskMonitor.DUMMY))
+        return sw.toString() or 'Script ran with no output'
+
+    def define_class(self, name, own_fields, base_class=None, total_size=None, category='/'):
+        '''Define a C++ class in Ghidra DTM with PROPER INHERITANCE via embedded base struct.
+        base_class: name of existing struct to embed at offset 0 (primary base class)
+                    If not in DTM yet, call define_class for the base first.
+        own_fields: {fname: (offset, size, comment)} — absolute offsets WITHIN THIS CLASS
+                    Only include fields NOT in the base class (offsets >= sizeof(base)).
+        Existing named own-fields are preserved (base re-embedding is always updated).
+        Ghidra decompiler shows: this->base_class.formID (inherited) + this->health (own).
+        Use build_hierarchy(rt_ptr) to automatically create the full chain.'''
+        from ghidra.program.model.data import StructureDataType, CategoryPath, DataTypeConflictHandler
+        from ghidra.program.model.data import ByteDataType, DWordDataType, QWordDataType, WordDataType
+        import re as _re
+        dtm = currentProgram.getDataTypeManager()
+        cat = CategoryPath(category)
+        size_to_dt = {1: ByteDataType.dataType, 2: WordDataType.dataType,
+                      4: DWordDataType.dataType, 8: QWordDataType.dataType}
+        # Find base class DataType
+        base_dt = self._find_dt(base_class) if base_class else None
+        if base_class and base_dt is None:
+            return 'Base class \'%s\' not found in DTM. Call reng.define_class for it first, or reng.build_hierarchy(rt_ptr) to auto-create the chain.' % base_class
+        base_size = base_dt.getLength() if base_dt else 0
+        # Collect own fields from existing struct (preserve named non-base fields)
+        merged = {}
+        existing = self._find_dt(name)
+        if existing:
+            for comp in existing.getComponents():
+                fname = comp.getFieldName() or ''
+                if fname and not fname.endswith('_base'):  # skip old base embeddings
+                    merged[comp.getOffset()] = (fname, comp.getLength(), comp.getComment() or '')
+        for fname, (off, sz, comment) in own_fields.items():
+            merged[off] = (fname, sz, comment)
+        # Compute total size
+        ends = [base_size] + [off + sz for off, (_, sz, _) in merged.items()]
+        size = total_size or max(ends) if ends else 1
+        # Build struct
+        st = StructureDataType(cat, name, size, dtm)
+        # Embed base class at offset 0
+        if base_dt:
+            try: st.insertAtOffset(0, base_dt, base_dt.getLength(), base_class + '_base', 'Inherited from ' + base_class)
+            except: pass
+        # Add own fields (only those not overlapping with base)
+        for off, (fname, sz, comment) in sorted(merged.items()):
+            if off < base_size: continue  # skip fields that are in base class range
+            dt = size_to_dt.get(sz, ByteDataType.dataType)
+            try: st.insertAtOffset(off, dt, sz, fname, comment)
+            except: pass
+        tx = currentProgram.startTransaction('define_class: ' + name)
+        try:
+            result = dtm.addDataType(st, DataTypeConflictHandler.REPLACE_HANDLER)
+            currentProgram.endTransaction(tx, True)
+            chain = (' extends ' + base_class) if base_class else ''
+            return 'Created: %s%s (%d bytes, %d own fields, %d inherited via base)' % (
+                name, chain, size, len(merged), (base_dt.getLength() if base_dt else 0))
+        except Exception as e:
+            currentProgram.endTransaction(tx, False)
+            return 'error: ' + str(e)
+
+    def build_hierarchy(self, rt_ptr):
+        '''Auto-create properly-embedded Ghidra structs for the full RTTI inheritance chain.
+        Uses class_hierarchy() to find all base classes (most-derived to most-base),
+        then creates/updates each class struct from deepest base upward, each embedding
+        its parent. Existing named fields and own-fields are preserved.
+        Result: TESObjectREFR { TESForm_base; ... own fields ... }
+                Actor { TESObjectREFR_base; ... own fields ... }
+                PlayerCharacter { Character_base; ... own fields ... }
+        After running, explore() shows KNOWN: inherited fields with their source class.
+        Returns list of {class, action, base, struct_size} dicts.'''
+        hierarchy = self.class_hierarchy(rt_ptr)
+        if not hierarchy or 'error' in hierarchy[0]:
+            return [{'error': str(hierarchy)}]
+        # hierarchy[0] = most derived (offset 0), last = most base
+        # Filter to single-inheritance chain (offset 0 entries only, distinct classes)
+        chain = []
+        seen = set()
+        for entry in hierarchy:
+            cn = entry.get('class', '')
+            if cn and cn not in seen:
+                chain.append(cn)
+                seen.add(cn)
+        # Build from most-base to most-derived
+        results = []
+        prev = None
+        for class_name in reversed(chain):
+            existing = self._find_dt(class_name)
+            if existing is None:
+                r = self.define_class(class_name, {}, base_class=prev)
+                action = 'created stub'
+            else:
+                # Check if base is already embedded
+                comps = list(existing.getComponents())
+                has_correct_base = prev is None or any(
+                    (c.getFieldName() or '').endswith('_base') and c.getDataType().getName() == prev
+                    for c in comps
+                )
+                if not has_correct_base:
+                    r = self.define_class(class_name, {}, base_class=prev,
+                                         total_size=existing.getLength())
+                    action = 'updated: embedded %s_base' % prev
+                else:
+                    r = 'already correct'
+                    action = 'skipped (already has base)'
+            dt = self._find_dt(class_name)
+            results.append({'class': class_name, 'base': prev, 'action': action,
+                            'size': dt.getLength() if dt else 0})
+            prev = class_name
+        return results
+
+    def apply_struct(self, static_or_rt_addr, struct_name, is_runtime=False):
+        '''Apply a Ghidra DataType to an address in the Listing view.
+        This is the write-back step: once you have defined a struct with define_struct(),
+        call apply_struct() to see it rendered with field names in the Ghidra listing/decompiler.
+        static_or_rt_addr: static Ghidra address (or runtime addr if is_runtime=True)
+        struct_name: name of a struct already in Ghidra DataTypeManager
+        is_runtime: if True, converts runtime addr to static first using reng.to_static()
+        Returns ok/error string.'''
+        from ghidra.program.model.data import DataUtilities
+        from ghidra.program.model.data import DataUtilities as DU
+        addr_int = self.to_static(static_or_rt_addr) if is_runtime else static_or_rt_addr
+        if addr_int is None: return 'Error: address conversion failed'
+        dtm = currentProgram.getDataTypeManager()
+        dt = None
+        for d in dtm.getAllDataTypes():
+            if d.getName() == struct_name:
+                dt = d; break
+        if dt is None: return 'Struct not found in DTM: %s (use reng.define_struct first)' % struct_name
+        ds   = currentProgram.getAddressFactory().getDefaultAddressSpace()
+        addr = ds.getAddress(addr_int)
+        tx   = currentProgram.startTransaction('apply_struct: %s @ 0x%x' % (struct_name, addr_int))
+        try:
+            DataUtilities.createData(currentProgram, addr, dt, -1,
+                DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA)
+            currentProgram.endTransaction(tx, True)
+            return 'Applied %s at 0x%x — visible in Ghidra Listing view' % (struct_name, addr_int)
+        except Exception as e:
+            currentProgram.endTransaction(tx, False)
+            return 'Error: ' + str(e)
+
+    def as_known(self, rt_addr, offset, struct_name):
+        '''Read an inline (non-pointer) sub-struct embedded at rt_addr+offset.
+        Looks up struct_name in Ghidra's data type manager, reads that many bytes,
+        and returns field values using the existing type definition.
+        Example: reng.as_known(actor_ptr, 0xD0, "NiPoint3") → {x, y, z}
+        Complement to follow() which dereferences a pointer field.'''
+        import struct as _st
+        dtm = currentProgram.getDataTypeManager()
+        # Find the struct by name
+        dt = None
+        for d in dtm.getAllDataTypes():
+            if d.getName() == struct_name and hasattr(d, 'getComponents'):
+                dt = d; break
+        if dt is None:
+            return 'Struct not found in Ghidra type manager: %s (define with reng.define_struct first)' % struct_name
+        raw = self._read_rt(rt_addr + offset, dt.getLength())
+        if not raw: return 'Error reading %d bytes at 0x%x+0x%x' % (dt.getLength(), rt_addr, offset)
+        result = {}
+        for comp in dt.getComponents():
+            fname = comp.getFieldName() or ('field_%x' % comp.getOffset())
+            off2  = comp.getOffset()
+            sz    = comp.getLength()
+            chunk = raw[off2:off2+sz]
+            if sz == 4:   result[fname] = _st.unpack_from('<i', chunk)[0]
+            elif sz == 8: result[fname] = _st.unpack_from('<q', chunk)[0]
+            elif sz == 2: result[fname] = _st.unpack_from('<h', chunk)[0]
+            elif sz == 1: result[fname] = chunk[0]
+            else:         result[fname] = chunk.hex()
+        return result
+
+    def tree(self, rt_addr, depth=2, max_ptrs=8, size=128, _indent=0):
+        '''Recursive struct explorer — like ReClass.NET tree view.
+        Explores object at rt_addr, then follows pointer fields up to `depth` levels.
+        max_ptrs: max pointer fields to recurse into per level (to avoid explosion).
+        Returns formatted string tree. Example:
+          reng.tree(player_ptr, depth=2) → player fields, then sub-object fields.
+        NOTE: depth>2 on a large object can be slow; start with depth=1.'''
+        import struct as _st
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0
+        pad = '  ' * _indent
+        dbg.refresh_memory(rt_addr, size)
+        raw = self._read_rt(rt_addr, size)
+        rtti_name = self.rtti(rt_addr)
+        lines = ['%s[0x%x] %s' % (pad, rt_addr, rtti_name or '?')]
+        if not raw:
+            lines.append('%s  <could not read memory>' % pad)
+            return '\n'.join(lines)
+        fm = currentProgram.getFunctionManager() if currentProgram else None
+        ds = currentProgram.getAddressFactory().getDefaultAddressSpace() if currentProgram else None
+        ptr_fields = []  # collect for recursion
+        for off in range(0, len(raw) - 7, 8):
+            chunk = raw[off:off+8]
+            u64   = _st.unpack_from('<Q', chunk)[0]
+            f32   = _st.unpack_from('<f', chunk[:4])[0]
+            i32   = _st.unpack_from('<i', chunk[:4])[0]
+            note  = ''
+            if u64 == 0:
+                note = 'null'
+            elif ib and ib <= u64 < ib + 0x10000000:
+                static = u64 - ib + sb
+                try:
+                    fn = fm.getFunctionAt(ds.getAddress(static)) if fm else None
+                    if fn: note = 'fn→%s' % fn.getName(True)
+                    else:
+                        sub_rtti = self.rtti(u64) if off > 0 else rtti_name
+                        note = 'ptr→%s' % (sub_rtti or 'SkyrimSE')
+                        if off > 0 and depth > 0 and len(ptr_fields) < max_ptrs:
+                            ptr_fields.append((off, u64, sub_rtti))
+                except: note = 'ptr→SkyrimSE'
+            elif 0x7f0000000000 <= u64 <= 0x7fffffffffff:
+                note = 'ptr→DLL/heap'
+            elif 0 < u64 <= 0xffff: note = 'int=%d' % u64
+            elif abs(f32) < 1e8 and abs(f32) > 1e-10 and f32 == f32:
+                note = 'f32≈%.4g' % f32
+            # Check if offset is in a known Ghidra struct
+            known = ''
+            if rtti_name:
+                ns = currentProgram.getSymbolTable().getNamespace(rtti_name, currentProgram.getGlobalNamespace()) if currentProgram else None
+                # Could look up offset in known struct here
+            if note != 'null' or off < 32:
+                lines.append('%s  +0x%-4x  %s  %s' % (pad, off, chunk[:4].hex(), note))
+        # Recurse into pointer fields
+        if depth > 0 and ptr_fields:
+            lines.append('%s  --- sub-objects ---' % pad)
+            for off, ptr, sub_rtti in ptr_fields:
+                lines.append('%s  [+0x%x → 0x%x  %s]:' % (pad, off, ptr, sub_rtti or '?'))
+                sub = self.tree(ptr, depth=depth-1, max_ptrs=max_ptrs, size=size, _indent=_indent+2)
+                lines.append(sub)
+        return '\n'.join(lines)
+
+    def find_type_at(self, rt_addr, offset, size=8):
+        '''Cross-reference what Ghidra knows about a field at a given offset.
+        Checks: is the value a fn ptr? a known vtable? does it match any Ghidra struct field?
+        Returns a description string. Use to understand a specific offset without full explore().'''
+        import struct as _st
+        ib = self.image_base()
+        sb = currentProgram.getImageBase().getOffset() if currentProgram else 0
+        raw = self._read_rt(rt_addr + offset, 8)
+        if not raw: return 'Cannot read memory at 0x%x+0x%x' % (rt_addr, offset)
+        u64 = _st.unpack_from('<Q', raw)[0]
+        f32 = _st.unpack_from('<f', raw[:4])[0]
+        i32 = _st.unpack_from('<i', raw[:4])[0]
+        result = ['Value @ 0x%x+0x%x: 0x%x' % (rt_addr, offset, u64),
+                  '  as i32: %d' % i32,
+                  '  as f32: %.6g' % f32]
+        if ib and ib <= u64 < ib + 0x10000000:
+            static = u64 - ib + sb
+            fm = currentProgram.getFunctionManager()
+            ds = currentProgram.getAddressFactory().getDefaultAddressSpace()
+            fn = fm.getFunctionAt(ds.getAddress(static))
+            if fn:
+                result.append('  → function: %s @ 0x%x' % (fn.getName(True), static))
+            else:
+                rtti = self.rtti(u64)
+                vtmap = self._vtable_cache or {}
+                cls = vtmap.get(static, rtti)
+                result.append('  → SkyrimSE ptr%s' % ((' → class: %s' % cls) if cls else ''))
+                if rtti: result.append('  → RTTI says: %s*' % rtti)
+        elif u64 == 0: result.append('  → null')
+        return '\n'.join(result)
+
+reng = REngHelpers()
+
