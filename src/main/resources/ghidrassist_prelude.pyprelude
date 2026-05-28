@@ -448,34 +448,31 @@ class REngHelpers:
         Returns int or None if no debugger session.'''
         if self._image_base_cache: return self._image_base_cache
         import re as _re
-        prog_name = currentProgram.getName().replace('.exe','') if currentProgram else ''
+        prog_name   = currentProgram.getName().replace('.exe','') if currentProgram else ''
         static_base = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
+        esc = _re.escape(prog_name)
         try:
             for t in dbg.get_threads():
                 name = t.getName(0)
-                # Match: ModuleName!FuncName+0xOFF (0xADDR) or similar WinDbg format
-                m = _re.search(r'%s![^+\s]+\+0x([0-9a-fA-F]+)\s+\(([0-9a-fA-F`]+)\)' % _re.escape(prog_name), name, _re.I)
-                if not m:
-                    m = _re.search(r'%s!([^+\s]+)\+0x([0-9a-fA-F]+)' % _re.escape(prog_name), name, _re.I)
+                if prog_name.lower() not in name.lower(): continue
+
+                # Pattern 1: Module!FUN_STATICADDR+0xOFFSET (RUNTIME_ADDR) — SkyrimSE
+                m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))\+0x([0-9a-fA-F]+)\s+\(([0-9a-fA-F`]+)\)' % esc, name, _re.I)
                 if m:
-                    groups = m.groups()
-                    offset = int(groups[-2], 16)
-                    rt_pc  = int(groups[-1].replace('`',''), 16)
-                    rt_fn  = rt_pc - offset
-                    # Find the static function address from the display name
-                    full = name
-                    # FUN_ pattern (SkyrimSE style)
-                    fn_m = _re.search(r'%s!(FUN_([0-9a-fA-F]+))' % _re.escape(prog_name), full, _re.I)
-                    if fn_m:
-                        static_fn = int(fn_m.group(2), 16)
-                        self._image_base_cache = rt_fn - (static_fn - static_base)
-                        return self._image_base_cache
-                    # thunk_StartAddress_0_XXXXXXXX pattern (SkyrimVR style)
-                    thunk_m = _re.search(r'%s!thunk_\w+_(1[0-9a-fA-F]+)' % _re.escape(prog_name), full, _re.I)
-                    if thunk_m:
-                        static_fn = int(thunk_m.group(1), 16)
-                        self._image_base_cache = rt_fn - (static_fn - static_base)
-                        return self._image_base_cache
+                    static_fn = int(m.group(2), 16)
+                    offset    = int(m.group(3), 16)
+                    rt_fn     = int(m.group(4).replace('`',''), 16) - offset
+                    self._image_base_cache = rt_fn - (static_fn - static_base)
+                    return self._image_base_cache
+
+                # Pattern 2: Module!anything_STATICADDR (RUNTIME_ADDR) — SkyrimVR thunks
+                # Thread is AT the function start (no +0x offset)
+                m2 = _re.search(r'%s!\w+_(1[0-9a-fA-F]{7,11})\s+\(([0-9a-fA-F`]+)\)' % esc, name, _re.I)
+                if m2:
+                    static_fn = int(m2.group(1), 16)
+                    rt_fn     = int(m2.group(2).replace('`',''), 16)
+                    self._image_base_cache = rt_fn - (static_fn - static_base)
+                    return self._image_base_cache
         except Exception as e: pass
         return None
 
