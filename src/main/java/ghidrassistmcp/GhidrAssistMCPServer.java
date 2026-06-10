@@ -1,6 +1,3 @@
-/* 
- * 
- */
 package ghidrassistmcp;
 
 import java.time.Duration;
@@ -19,6 +16,7 @@ import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
+import io.modelcontextprotocol.server.transport.HttpServletSseServerTransportProvider;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
 
@@ -30,6 +28,7 @@ import ghidrassistmcp.resources.McpResource;
 /**
  * Refactored MCP Server implementation that uses the backend architecture.
  * This class handles HTTP transport and delegates business logic to McpBackend.
+ * Supports both Streamable HTTP and SSE transports side-by-side.
  */
 public class GhidrAssistMCPServer {
     
@@ -70,11 +69,19 @@ public class GhidrAssistMCPServer {
             jettyServer.setHandler(context);
             
             // Create MCP transport provider using custom ObjectMapper that ignores unknown properties
-            Msg.info(this, "Creating MCP transport provider");
+            Msg.info(this, "Creating MCP transport providers");
             ObjectMapper objectMapper = new ObjectMapper();
             objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
             JacksonMcpJsonMapper mapper = new JacksonMcpJsonMapper(objectMapper);
+            String messageEndpoint = "/message";
             String mcpEndpoint = "/mcp";
+
+            HttpServletSseServerTransportProvider sseTransportProvider =
+                HttpServletSseServerTransportProvider.builder()
+                    .jsonMapper(mapper)
+                    .messageEndpoint(messageEndpoint)
+                    .keepAliveInterval(Duration.ofSeconds(15))
+                    .build();
 
             HttpServletStreamableServerTransportProvider streamableTransportProvider =
                 HttpServletStreamableServerTransportProvider.builder()
@@ -83,8 +90,12 @@ public class GhidrAssistMCPServer {
                     .keepAliveInterval(Duration.ofSeconds(15))
                     .build();
 
-            // Build MCP server using backend for configuration
-            Msg.info(this, "Building MCP server with backend tools");
+            // Build MCP servers using backend for configuration
+            Msg.info(this, "Building MCP servers with backend tools");
+            var sseServerBuilder = McpServer.sync(sseTransportProvider)
+                .serverInfo(backend.getServerInfo())
+                .capabilities(backend.getCapabilities());
+
             var streamableServerBuilder = McpServer.sync(streamableTransportProvider)
                 .serverInfo(backend.getServerInfo())
                 .capabilities(backend.getCapabilities());
@@ -99,6 +110,7 @@ public class GhidrAssistMCPServer {
                         return backend.callTool(toolName, params);
                     };
 
+                sseServerBuilder.toolCall(toolSchema, toolHandler);
                 streamableServerBuilder.toolCall(toolSchema, toolHandler);
                 Msg.info(this, "Registered tool with MCP server: " + toolName);
             }
@@ -106,22 +118,35 @@ public class GhidrAssistMCPServer {
             // Register MCP resources and prompts if backend supports them
             if (backend instanceof GhidrAssistMCPBackend) {
                 GhidrAssistMCPBackend ghidraBackend = (GhidrAssistMCPBackend) backend;
-                registerResources(streamableServerBuilder, ghidraBackend);
-                registerPrompts(streamableServerBuilder, ghidraBackend);
+                registerResources(sseServerBuilder, streamableServerBuilder, ghidraBackend);
+                registerPrompts(sseServerBuilder, streamableServerBuilder, ghidraBackend);
             }
 
+            sseServerBuilder.build();
             streamableServerBuilder.build();
             
             // Register MCP servlet - use root path since transport provider handles routing internally
             Msg.info(this, "Registering MCP servlet");
             
             try {
+                ServletHolder mcpSseServletHolder = new ServletHolder("mcp-sse-transport", sseTransportProvider);
+                mcpSseServletHolder.setAsyncSupported(true);
+                context.addServlet(mcpSseServletHolder, "/sse");
+                context.addServlet(mcpSseServletHolder, messageEndpoint);
+
                 ServletHolder mcpStreamableServletHolder = new ServletHolder("mcp-streamable-transport", streamableTransportProvider);
                 mcpStreamableServletHolder.setAsyncSupported(true);
                 context.addServlet(mcpStreamableServletHolder, "/mcp/*");
+                Msg.info(this, "Registered MCP SSE servlet mapping: /*");
                 Msg.info(this, "Registered MCP Streamable servlet mapping: /mcp/*");
                 
                 // Log configuration
+                Msg.info(this, "Transport provider class: " + sseTransportProvider.getClass().getName());
+                Msg.info(this, "Message endpoint configured as: " + messageEndpoint);
+                Msg.info(this, "SSE endpoint will be: /sse (default)");
+                Msg.info(this, "Expected client URLs:");
+                Msg.info(this, "  SSE: http://" + host + ":" + port + "/sse");
+                Msg.info(this, "  Messages: http://" + host + ":" + port + messageEndpoint);
                 Msg.info(this, "Streamable HTTP transport provider class: " + streamableTransportProvider.getClass().getName());
                 Msg.info(this, "Streamable MCP endpoint: http://" + host + ":" + port + mcpEndpoint);
                 
@@ -136,6 +161,8 @@ public class GhidrAssistMCPServer {
             // Verify server is listening
             if (jettyServer.isStarted()) {
                 Msg.info(this, "GhidrAssistMCP Server successfully started on port " + port);
+                Msg.info(this, "MCP SSE endpoint: http://" + host + ":" + port + "/sse");
+                Msg.info(this, "MCP message endpoint: http://" + host + ":" + port + messageEndpoint);
                 Msg.info(this, "MCP Streamable endpoint: http://" + host + ":" + port + mcpEndpoint);
                 Msg.info(this, "Server state: " + jettyServer.getState());
                 
@@ -175,10 +202,11 @@ public class GhidrAssistMCPServer {
     }
 
     /**
-     * Register MCP prompts with the server builder.
+     * Register MCP prompts with the server builders.
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private void registerPrompts(McpServer.SyncSpecification serverBuilder,
+    private void registerPrompts(McpServer.SyncSpecification sseServerBuilder,
+                                  McpServer.SyncSpecification streamableServerBuilder,
                                   GhidrAssistMCPBackend ghidraBackend) {
         try {
             List<McpPrompt> prompts = ghidraBackend.getAvailablePrompts();
@@ -213,9 +241,10 @@ public class GhidrAssistMCPServer {
                 Msg.info(this, "Prepared prompt for registration: " + prompt.getName());
             }
 
-            // Register all prompts with builder
+            // Register all prompts with both builders
             if (!promptSpecs.isEmpty()) {
-                serverBuilder.prompts(promptSpecs);
+                sseServerBuilder.prompts(promptSpecs);
+                streamableServerBuilder.prompts(promptSpecs);
                 Msg.info(this, "Registered " + promptSpecs.size() + " MCP prompts");
             }
 
@@ -225,10 +254,11 @@ public class GhidrAssistMCPServer {
     }
 
     /**
-     * Register MCP resources with the server builder.
+     * Register MCP resources with the server builders.
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private void registerResources(McpServer.SyncSpecification serverBuilder,
+    private void registerResources(McpServer.SyncSpecification sseServerBuilder,
+                                   McpServer.SyncSpecification streamableServerBuilder,
                                    GhidrAssistMCPBackend ghidraBackend) {
         try {
             List<McpResource> resources = ghidraBackend.getAvailableResources();
@@ -269,9 +299,10 @@ public class GhidrAssistMCPServer {
                 Msg.info(this, "Prepared resource for registration: " + resource.getName());
             }
 
-            // Register all resources with builder
+            // Register all resources with both builders
             if (!resourceSpecs.isEmpty()) {
-                serverBuilder.resources(resourceSpecs);
+                sseServerBuilder.resources(resourceSpecs);
+                streamableServerBuilder.resources(resourceSpecs);
                 Msg.info(this, "Registered " + resourceSpecs.size() + " MCP resources");
             }
 
