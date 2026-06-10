@@ -81,6 +81,10 @@ public class GhidrAssistMCPHeadlessServer {
             Msg.info(this, "Headless MCP server stopped");
         } catch (Exception e) {
             Msg.error(this, "Error stopping headless MCP server", e);
+        } finally {
+            if (headlessBackend != null) {
+                headlessBackend.shutdown();
+            }
         }
         server = null;
         headlessBackend = null;
@@ -111,35 +115,64 @@ public class GhidrAssistMCPHeadlessServer {
     private static class HeadlessBackend extends GhidrAssistMCPBackend {
 
         private volatile Program currentProgram;
+        private final Object programConsumer = new Object();
 
         HeadlessBackend(Program program) {
             super();
-            this.currentProgram = program;
-            // Notify backend of the initial program
-            onProgramActivated(program);
+            setProgram(program);
         }
 
-        void setProgram(Program program) {
-            if (this.currentProgram != null) {
-                onProgramDeactivated(this.currentProgram);
+        synchronized void setProgram(Program program) {
+            Program oldProgram = this.currentProgram;
+            if (oldProgram != null) {
+                onProgramDeactivated(oldProgram);
+                releaseProgram(oldProgram);
             }
             this.currentProgram = program;
             if (program != null) {
+                if (!program.isClosed()) {
+                    program.addConsumer(programConsumer);
+                }
                 onProgramActivated(program);
             }
         }
 
         @Override
         public Program getCurrentProgram() {
+            if (currentProgram != null && currentProgram.isClosed()) {
+                Msg.warn(this, "Headless current program is closed; clearing program reference");
+                currentProgram = null;
+            }
             return currentProgram;
         }
 
         @Override
         public List<Program> getAllOpenPrograms() {
-            if (currentProgram != null) {
-                return Collections.singletonList(currentProgram);
+            Program program = getCurrentProgram();
+            if (program != null) {
+                return Collections.singletonList(program);
             }
             return Collections.emptyList();
+        }
+
+        synchronized void shutdown() {
+            Program program = currentProgram;
+            currentProgram = null;
+            if (program != null) {
+                onProgramDeactivated(program);
+                releaseProgram(program);
+            }
+            getTaskManager().shutdown();
+        }
+
+        private void releaseProgram(Program program) {
+            try {
+                if (!program.isClosed() && program.isUsedBy(programConsumer)) {
+                    program.release(programConsumer);
+                }
+            } catch (Exception e) {
+                Msg.warn(this, "Failed to release headless program consumer: " + e.getMessage(), e);
+            }
         }
     }
 }

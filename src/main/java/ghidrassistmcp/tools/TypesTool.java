@@ -58,7 +58,8 @@ public class TypesTool implements McpTool {
                 Map.entry("offset", Map.of("type", "integer", "description", "Pagination offset (for list)")),
                 Map.entry("limit", Map.of("type", "integer", "description", "Pagination limit (for list, default 100)")),
                 Map.entry("address", Map.of("type", "string", "description", "Address (for set action)")),
-                Map.entry("data_type", Map.of("type", "string", "description", "Data type name (for set action)")),
+                Map.entry("data_type", Map.of("type", "string", "description", "Data type name (for set action). Supports array suffix syntax like 'int[16]'.")),
+                Map.entry("array_count", Map.of("type", "integer", "description", "For set action: wraps data_type in an array of this many elements")),
                 Map.entry("size", Map.of("type", "integer", "description", "Size in bytes (for create_struct/create_enum)")),
                 Map.entry("packed", Map.of("type", "boolean", "description", "Enable packing (for create_struct)")),
                 Map.entry("values", Map.of("type", "object", "description", "Enum values as name:value pairs (for create_enum)")),
@@ -192,10 +193,10 @@ public class TypesTool implements McpTool {
         try { address = program.getAddressFactory().getAddress(addressStr); }
         catch (Exception e) { return result("Invalid address: " + addressStr); }
 
-        DataTypeManager dtm = program.getDataTypeManager();
-        DataType dataType = dtm.getDataType("/" + dataTypeName);
-        if (dataType == null) dataType = dtm.getDataType(dataTypeName);
-        if (dataType == null) return result("Data type not found: " + dataTypeName);
+        DataTypeResolver.Result resolvedType =
+            DataTypeResolver.resolve(program.getDataTypeManager(), dataTypeName, arguments.get("array_count"));
+        if (resolvedType.isError()) return result(resolvedType.errorMessage);
+        DataType dataType = resolvedType.dataType;
 
         int txId = program.startTransaction("Set Data Type");
         try {

@@ -12,10 +12,10 @@ import java.util.List;
 import java.util.Map;
 
 import ghidra.app.services.ProgramManager;
-import ghidra.app.util.importer.AutoImporter;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.app.util.importer.ProgramLoader;
+import ghidra.app.util.opinion.BinaryLoader;
 import ghidra.app.util.opinion.LoadResults;
-import ghidra.app.util.opinion.Loaded;
 import ghidra.framework.model.Project;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
@@ -144,6 +144,13 @@ public class ImportFileTool implements McpTool {
         }
 
         String baseAddrStr = (String) arguments.get("base_address");
+        String programName = (String) arguments.get("program_name");
+        if (programName != null) {
+            programName = programName.trim();
+            if (programName.isEmpty()) {
+                programName = null;
+            }
+        }
 
         String folderPath = (String) arguments.get("folder");
         if (folderPath == null || folderPath.isBlank()) {
@@ -155,15 +162,14 @@ public class ImportFileTool implements McpTool {
 
         // --- Perform import ---
         MessageLog messageLog = new MessageLog();
-        Object consumer = this;
 
         try {
             if (languageStr != null && !languageStr.isBlank()) {
                 return importWithLanguage(file, project, folderPath, languageStr, compilerStr,
-                    baseAddrStr, openAfterImport, consumer, messageLog, pluginTool);
+                    baseAddrStr, programName, openAfterImport, messageLog, pluginTool);
             } else {
-                return importAutoDetect(file, project, folderPath, baseAddrStr,
-                    openAfterImport, consumer, messageLog, pluginTool);
+                return importAutoDetect(file, project, folderPath, baseAddrStr, programName,
+                    openAfterImport, messageLog, pluginTool);
             }
         } catch (ghidra.util.exception.DuplicateNameException e) {
             return textResult("A program with that name already exists in folder '" + folderPath +
@@ -174,10 +180,9 @@ public class ImportFileTool implements McpTool {
         }
     }
 
-    @SuppressWarnings("deprecation")
     private McpSchema.CallToolResult importWithLanguage(File file, Project project, String folderPath,
-            String languageStr, String compilerStr, String baseAddrStr, boolean openAfterImport,
-            Object consumer, MessageLog messageLog, PluginTool pluginTool) throws Exception {
+            String languageStr, String compilerStr, String baseAddrStr, String programName,
+            boolean openAfterImport, MessageLog messageLog, PluginTool pluginTool) throws Exception {
 
         Language language;
         try {
@@ -197,62 +202,85 @@ public class ImportFileTool implements McpTool {
                 " for language " + languageStr + ". Error: " + e.getMessage());
         }
 
-        Loaded<Program> loaded = AutoImporter.importAsBinary(
-            file, project, folderPath, language, compilerSpec,
-            consumer, messageLog, TaskMonitor.DUMMY);
+        ProgramLoader.Builder loader = ProgramLoader.builder()
+            .source(file)
+            .project(project)
+            .projectFolderPath(folderPath)
+            .loaders(BinaryLoader.class)
+            .language(language)
+            .compiler(compilerSpec)
+            .log(messageLog)
+            .monitor(TaskMonitor.DUMMY);
 
-        if (loaded == null) {
-            return textResult("Import failed - no program was created." + formatLog(messageLog));
+        if (programName != null) {
+            loader.name(programName);
         }
 
-        Program importedProgram = loaded.getDomainObject(consumer);
-        applyBaseAddress(importedProgram, baseAddrStr);
-        loaded.save(TaskMonitor.DUMMY);
+        try (LoadResults<Program> loadResults = loader.load()) {
+            if (loadResults.size() == 0) {
+                return textResult("Import failed - no program was created." + formatLog(messageLog));
+            }
 
-        StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
+            Program importedProgram = getPrimaryProgram(loadResults);
+            applyBaseAddress(importedProgram, baseAddrStr);
+            loadResults.save(TaskMonitor.DUMMY);
 
-        if (openAfterImport) {
-            result.append(openInCodeBrowser(pluginTool, importedProgram));
+            StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
+
+            if (openAfterImport) {
+                result.append(openInCodeBrowser(pluginTool, importedProgram));
+            }
+
+            return McpSchema.CallToolResult.builder()
+                .addTextContent(result.toString())
+                .build();
         }
-
-        loaded.release(consumer);
-
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
     }
 
-    @SuppressWarnings("deprecation")
     private McpSchema.CallToolResult importAutoDetect(File file, Project project, String folderPath,
-            String baseAddrStr, boolean openAfterImport, Object consumer,
+            String baseAddrStr, String programName, boolean openAfterImport,
             MessageLog messageLog, PluginTool pluginTool) throws Exception {
 
-        LoadResults<Program> loadResults = AutoImporter.importByUsingBestGuess(
-            file, project, folderPath, consumer, messageLog, TaskMonitor.DUMMY);
+        ProgramLoader.Builder loader = ProgramLoader.builder()
+            .source(file)
+            .project(project)
+            .projectFolderPath(folderPath)
+            .log(messageLog)
+            .monitor(TaskMonitor.DUMMY);
 
-        if (loadResults == null || loadResults.size() == 0) {
-            return textResult("Import failed - Ghidra could not detect the file format." +
-                formatLog(messageLog));
+        if (programName != null) {
+            loader.name(programName);
         }
 
-        Program importedProgram = loadResults.getPrimaryDomainObject(consumer);
-        applyBaseAddress(importedProgram, baseAddrStr);
-        loadResults.save(TaskMonitor.DUMMY);
+        try (LoadResults<Program> loadResults = loader.load()) {
+            if (loadResults.size() == 0) {
+                return textResult("Import failed - Ghidra could not detect the file format." +
+                    formatLog(messageLog));
+            }
 
-        StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
+            Program importedProgram = getPrimaryProgram(loadResults);
+            applyBaseAddress(importedProgram, baseAddrStr);
+            loadResults.save(TaskMonitor.DUMMY);
 
-        if (openAfterImport) {
-            result.append(openInCodeBrowser(pluginTool, importedProgram));
+            StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
+
+            if (openAfterImport) {
+                result.append(openInCodeBrowser(pluginTool, importedProgram));
+            }
+
+            return McpSchema.CallToolResult.builder()
+                .addTextContent(result.toString())
+                .build();
         }
-
-        loadResults.release(consumer);
-
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
     }
 
     // --- Helpers ---
+
+    private static Program getPrimaryProgram(LoadResults<Program> loadResults) {
+        Program[] program = new Program[1];
+        loadResults.getPrimary().apply(p -> program[0] = p);
+        return program[0];
+    }
 
     private static void applyBaseAddress(Program program, String baseAddrStr) {
         if (baseAddrStr == null || baseAddrStr.isBlank()) {
