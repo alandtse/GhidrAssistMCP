@@ -7,6 +7,7 @@ try:
 except: pass
 class GhidraHelpers:
     def get_program(self, name):
+        '''Return the Program object for a program name if it is open in Ghidra.'''
         try:
             from ghidra.app.services import ProgramManager
             pm = state.getTool().getService(ProgramManager)
@@ -58,9 +59,11 @@ class GhidraHelpers:
             except: pass
         return sessions
     def get_vt_session(self, idx=0):
+        '''Return the open VTSession at the specified index, or None if not found.'''
         sessions = self.get_vt_sessions()
         return sessions[idx] if len(sessions) > idx else None
     def copy_datatype(self, name, from_prog, to_prog):
+        '''Copy a DataType by name from one program to another using the REPLACE_HANDLER.'''
         try:
             from ghidra.program.model.data import DataTypeConflictHandler
             dt = None
@@ -74,9 +77,11 @@ class GhidraHelpers:
         except: pass
         return False
     def get_addr(self, s):
+        '''Convert a string or address object to a Ghidra Address object.'''
         if hasattr(s, 'getAddress'): return s.getAddress()
         return currentProgram.getAddressFactory().getAddress(str(s))
     def get_func(self, id):
+        '''Retrieve a Ghidra Function object by its static address, hex address string, or function name.'''
         fm = currentProgram.getFunctionManager()
         try: 
             a = self.get_addr(id)
@@ -86,6 +91,7 @@ class GhidraHelpers:
             if f.getName() == id: return f
         return None
     def decompile(self, id):
+        '''Decompile a function by address, hex string, or name and return its decompiled C/C++ representation.'''
         f = self.get_func(id)
         if not f: return 'Function not found'
         di = DecompInterface()
@@ -95,9 +101,11 @@ class GhidraHelpers:
         di.dispose()
         return ret
     def get_refs_to(self, addr):
+        '''Return a list of source address strings that reference the given target address.'''
         rm = currentProgram.getReferenceManager()
         return [r.getFromAddress().toString() for r in rm.getReferencesTo(self.get_addr(addr))]
     def set_comment(self, addr, text, type='eol'):
+        '''Set a comment of the specified type (eol, pre, post, plate) at the target address.'''
         ct = {'eol': CommentType.EOL, 'pre': CommentType.PRE, 'post': CommentType.POST, 'plate': CommentType.PLATE}.get(type, CommentType.EOL)
         currentProgram.getListing().setComment(self.get_addr(addr), ct, text)
     def find_struct(self, name):
@@ -129,6 +137,7 @@ class GhidraHelpers:
             out.append((c.getOffset(), fn, c.getDataType().getName(), c.getLength()))
         return out
     def read_bytes(self, addr, length):
+        '''Read length bytes starting at the target address and return them as a hex string.'''
         try:
             b = currentProgram.getMemory().getBytes(self.get_addr(addr), length)
             return ''.join(['%02x' % (x & 0xff) for x in b])
@@ -196,6 +205,7 @@ class DebuggerHelpers:
     Addresses: pass hex-string ('0x1234') or int; internal conversion via trace.getBaseAddressFactory().
     '''
     def _tool(self):
+        '''Get the active PluginTool from the current state.'''
         return state.getTool()
 
     @staticmethod
@@ -218,6 +228,7 @@ class DebuggerHelpers:
         return addr_int, hex_str, ghidra_addr
 
     def _svc(self, cls_fqn):
+        '''Retrieve the service of the specified class from the active tool.'''
         try:
             parts = cls_fqn.rsplit('.', 1)
             import importlib
