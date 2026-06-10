@@ -18,8 +18,8 @@ import java.util.List;
 import java.util.Map;
 
 import ghidra.app.services.ProgramManager;
-import ghidra.app.util.importer.AutoImporter;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.app.util.importer.ProgramLoader;
 import ghidra.app.util.opinion.LoadResults;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
@@ -195,26 +195,37 @@ public class ProjectTool implements McpTool {
 
         try {
             MessageLog log = new MessageLog();
-            @SuppressWarnings("unchecked")
-            LoadResults<Program> results = (LoadResults<Program>) AutoImporter.importByUsingBestGuess(
-                f, project, "/", this, log, TaskMonitor.DUMMY);
+            ProgramLoader.Builder loader = ProgramLoader.builder()
+                .source(f)
+                .project(project)
+                .projectFolderPath("/")
+                .log(log)
+                .monitor(TaskMonitor.DUMMY);
 
-            if (results == null || results.size() == 0) return McpSchema.CallToolResult.builder()
-                .addTextContent("Import failed. Log:\n" + log.toString()).build();
+            try (LoadResults<Program> results = loader.load()) {
+                if (results.size() == 0) return McpSchema.CallToolResult.builder()
+                    .addTextContent("Import failed. Log:\n" + log.toString()).build();
 
-            results.save(TaskMonitor.DUMMY);
-            Program prog = results.getPrimaryDomainObject(this);
-            ProgramManager pm = tool.getService(ProgramManager.class);
-            if (pm != null && prog != null) pm.openProgram(prog);
+                results.save(TaskMonitor.DUMMY);
+                Program prog = getPrimaryProgram(results);
+                ProgramManager pm = tool.getService(ProgramManager.class);
+                if (pm != null && prog != null) pm.openProgram(prog);
 
-            String msg = "Imported and opened: " + f.getName();
-            if (!log.toString().isBlank()) msg += "\nLog: " + log;
-            return McpSchema.CallToolResult.builder().addTextContent(msg).build();
+                String msg = "Imported and opened: " + f.getName();
+                if (!log.toString().isBlank()) msg += "\nLog: " + log;
+                return McpSchema.CallToolResult.builder().addTextContent(msg).build();
+            }
 
         } catch (Exception e) {
             Msg.error(this, "Error importing: " + filePath, e);
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Error importing '" + filePath + "': " + e.getMessage()).build();
         }
+    }
+
+    private static Program getPrimaryProgram(LoadResults<Program> loadResults) {
+        Program[] program = new Program[1];
+        loadResults.getPrimary().apply(p -> program[0] = p);
+        return program[0];
     }
 }

@@ -10,7 +10,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
-- **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
+- **Streamable HTTP Transport**: Implements the modern, single-endpoint Streamable HTTP transport
 - **47 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
@@ -155,8 +155,6 @@ To keep a headless MCP session open after analysis completes, run the server as 
 MCP clients can connect to:
 
 ```text
-SSE:             http://127.0.0.1:8080/sse
-SSE messages:    http://127.0.0.1:8080/message
 Streamable HTTP: http://127.0.0.1:8080/mcp
 ```
 
@@ -696,7 +694,7 @@ GhidrAssistMCP/
 │   └── Owns shared server and backend
 ├── GhidrAssistMCPPlugin      # Plugin instance (one per CodeBrowser window)
 │   └── Registers with singleton manager
-├── GhidrAssistMCPServer      # HTTP MCP server (SSE + Streamable)
+├── GhidrAssistMCPServer      # HTTP MCP server (Streamable HTTP)
 │   └── Single shared instance on port 8080
 ├── GhidrAssistMCPBackend     # Tool management and execution
 │   ├── Tool registry with enable/disable states
@@ -758,11 +756,8 @@ GhidrAssistMCP/
 ### MCP Protocol Implementation
 
 - **Transports**:
-  - HTTP with Server-Sent Events (SSE)
   - Streamable HTTP
 - **Endpoints**:
-  - `GET /sse` - SSE connection for bidirectional communication
-  - `POST /message` - Message exchange endpoint
   - `GET /mcp` - Receive Streamable HTTP events
   - `POST /mcp` - Initialize Streamable HTTP session
   - `DELETE /mcp` - Terminate Streamable HTTP session
@@ -851,8 +846,8 @@ gradle buildExtension --debug
 
 ### Dependencies
 
-- **MCP SDK**: `io.modelcontextprotocol.sdk:mcp:0.17.1`
-- **Jetty Server**: `11.0.20` (HTTP/SSE transport)
+- **MCP SDK**: `io.modelcontextprotocol.sdk:mcp-core:1.1.3` / `mcp-json-jackson2:1.1.3`
+- **Jetty Server**: `11.0.20` (Streamable HTTP transport)
 - **Jackson**: `2.18.3` (JSON processing)
 - **Ghidra API**: Bundled with Ghidra installation
 
@@ -898,7 +893,7 @@ Detailed logging in Ghidra's console:
 #### MCP Client Connection Issues
 
 - Confirm server is running (check GhidrAssistMCP window)
-- Test connection: `curl http://localhost:8080/sse`
+- Test connection: `curl -X POST http://localhost:8080/mcp`
 - Check firewall settings
 
 #### Tool Execution Failures

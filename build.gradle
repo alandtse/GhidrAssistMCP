@@ -43,8 +43,9 @@ repositories {
 }
 
 dependencies {
-	// MCP SDK core dependency
-	implementation 'io.modelcontextprotocol.sdk:mcp:0.17.1'
+	// MCP SDK dependencies (Jackson 2 modules)
+	implementation 'io.modelcontextprotocol.sdk:mcp-core:1.1.3'
+	implementation 'io.modelcontextprotocol.sdk:mcp-json-jackson2:1.1.3'
 	
 	// Jetty embedded server for servlet container
 	implementation 'org.eclipse.jetty:jetty-server:11.0.20'
