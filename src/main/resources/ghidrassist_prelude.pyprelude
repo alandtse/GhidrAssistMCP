@@ -5,6 +5,28 @@ import ghidra.program.model.symbol.SourceType as SourceType
 try:
     from ghidra.feature.vt.api.main import VTSession, VTMatchInfo
 except: pass
+
+def _mod_basename(name):
+    '''Filename portion of a module/program name or path, lowercased.'''
+    return str(name).replace('\\', '/').rsplit('/', 1)[-1].lower()
+
+def _mod_stem(name):
+    '''Base name before the first dot — strips extension AND version suffix.
+    "SkyrimSE.1170.exe" -> "skyrimse"; "SkyrimSE.exe" -> "skyrimse".'''
+    return _mod_basename(name).split('.')[0]
+
+def module_name_matches(module_name, prog_name):
+    '''True if a trace module name corresponds to a Ghidra program name, tolerant
+    of version suffixes. Critical for multi-version RE projects where the program
+    is loaded as e.g. "SkyrimSE.1170.exe" but the live module reports "SkyrimSE.exe".
+    Order: exact basename -> mutual endswith -> base-stem (before first dot).
+    Stem match keeps SkyrimSE vs SkyrimVR / Fallout4 vs Fallout4VR distinct.'''
+    m = _mod_basename(module_name)
+    p = _mod_basename(prog_name)
+    if m == p: return True
+    if m.endswith(p) or p.endswith(m): return True
+    return _mod_stem(module_name) == _mod_stem(prog_name)
+
 class GhidraHelpers:
     def get_program(self, name):
         try:
@@ -406,7 +428,7 @@ class DebuggerHelpers:
                 if trace is not None:
                     prog_name = currentProgram.getName()
                     for m in trace.getModuleManager().getAllModules():
-                        if str(m.getName(snap)).lower().endswith(prog_name.lower()):
+                        if module_name_matches(m.getName(snap), prog_name):
                             return addr_int - sb + m.getBase(snap).getOffset()
         return addr_int
 
@@ -610,7 +632,7 @@ class DebuggerHelpers:
             # Find the matching trace module by program filename
             mod = None
             for m in trace.getModuleManager().getAllModules():
-                if str(m.getName(snap)).lower().endswith(prog_name.lower()):
+                if module_name_matches(m.getName(snap), prog_name):
                     mod = m; break
             if mod is None: return False
             mod_base   = mod.getBase(snap)
@@ -624,7 +646,7 @@ class DebuggerHelpers:
                 for entry in trace.getStaticMappingManager().getAllEntries():
                     entry_start = entry.getMinTraceAddress()
                     url = entry.getStaticProgramURL()
-                    if not (url and url.getPath().endswith(prog_name)): continue
+                    if not (url and module_name_matches(url.getPath(), prog_name)): continue
                     if entry_start.getOffset() == mod_base.getOffset():
                         return True  # exact same mapping, no-op
                     # Same program, different base = stale mapping from previous attach
@@ -996,8 +1018,7 @@ class REngHelpers:
             if trace is not None:
                 snap = dbg.get_snap()
                 for m in trace.getModuleManager().getAllModules():
-                    mod_name = str(m.getName(snap))
-                    if mod_name.lower().endswith(prog_name.lower()):
+                    if module_name_matches(m.getName(snap), prog_name):
                         self._image_base_cache[key] = m.getBase(snap).getOffset()
                         return self._image_base_cache[key]
         except Exception: pass
