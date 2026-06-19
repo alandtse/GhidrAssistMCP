@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Streamable HTTP Transport**: Implements the modern, single-endpoint Streamable HTTP transport
-- **47 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **49 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (47 total)
+- **View all available tools** (49 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -162,7 +162,7 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 47 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 49 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -175,6 +175,28 @@ GhidrAssistMCP provides 47 tools organized into categories. Several tools use an
 | `export_program` | Export the current program to disk (`binary` or `original_file`) *(disabled by default)* |
 
 > **Security-sensitive tools:** `import_file` and `export_program` are disabled by default because they interact with the host filesystem. Enable them explicitly in the plugin configuration UI when needed.
+
+#### `project` - Project & Program Management
+
+Open existing programs from the current Ghidra project, or import new binaries from disk. Useful for bootstrapping a session from MCP without touching the Ghidra UI.
+
+| Action | Description |
+| ------ | ----------- |
+| `list_files` | List all programs already imported into the current Ghidra project |
+| `open` | Open an already-imported program in CodeBrowser by name (`name`, partial match supported) |
+| `import` | Import a new binary from disk and open it (`file_path`); reads arbitrary files from the host filesystem |
+
+#### `scripts` - Ghidra Script Management
+
+Manage and run scripts in the user's Ghidra scripts directory (`~/ghidra_scripts`). Scripts written here appear in Ghidra's Script Manager after clicking Refresh.
+
+| Action | Description |
+| ------ | ----------- |
+| `list` | List `.py`/`.java` scripts with `name`, `category`, `description`, and `path` (optional `pattern` filename filter) |
+| `read` | Return the full source of a named script (`name`) |
+| `write` | Create or overwrite a script (`name`, `code`, optional `category` and `description`); prepends `@category`/`@description` metadata automatically |
+| `run` | Execute a named script in the current Ghidra context (`name`); output is captured and returned |
+| `delete` | Delete a script file (`name`) |
 
 ### Function Discovery & Analysis
 
@@ -330,7 +352,8 @@ Equates associate symbolic names with constant integer values used in disassembl
 
 | Parameter | Description |
 | --------- | ----------- |
-| `script`  | Execute arbitrary Python 3 code in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or it falls back to Jython 2.7). The global variables `currentProgram`, `currentAddress`, and `monitor` are automatically accessible in your scripts. |
+| `script`  | Python 3 code to execute in Ghidra's context. Requires launching Ghidra with `pyghidra.bat` for Python 3 support (or falls back to Jython 2.7). Globals: `currentProgram`, `currentAddress`, `monitor`, `state`. |
+| `sync`    | Optional boolean. Default `false` (async — returns a `task_id`, poll with `get_task_status`). Pass `true` for inline result on quick scripts (under ~2s) to skip the task-id round-trip. |
 
 A `ghidra` helper object is pre-injected with common operations:
 
@@ -341,7 +364,9 @@ A `ghidra` helper object is pre-injected with common operations:
 | `ghidra.get_program(name)` | Return an open `Program` object by name |
 | `ghidra.get_refs_to(addr)` | List all callers of an address |
 | `ghidra.set_comment(addr, text, type)` | Set an EOL/PRE/POST/PLATE comment |
-| `ghidra.find_struct(name)` | Return a `Structure` data type object |
+| `ghidra.find_struct(name)` | Return a `Structure` data type object (warning: stringifying dumps the entire field table — use `struct_summary`/`struct_fields` for compact output) |
+| `ghidra.struct_summary(name)` | Compact summary: `{name, size, field_count, category}` |
+| `ghidra.struct_fields(name, prefix=None)` | Slim field list: `[(offset, name, type, size)]` (optional name-prefix filter) |
 | `ghidra.read_bytes(addr, length)` | Read memory as a hex string |
 | `ghidra.copy_datatype(name, from_prog, to_prog)` | Copy a struct/enum between open programs |
 | `ghidra.list_vt_sessions()` | List open Version Tracking sessions: `[{name, src, dst, match_count}]` |
@@ -355,21 +380,98 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 | Helper | Description |
 | ------ | ----------- |
 | `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}` |
+| `dbg.execute(cmd)` | Run a raw dbgeng/WinDbg command and return its output: `k`, `~`, `lm`, `sxd av`, `.lastevent`, `!analyze -v`, `bp …`. The keystone for engine features Ghidra doesn't surface |
+| `dbg.py_execute(python)` | Run raw Python in the ghidradbg backend process (`util`, `util.dbg` in scope); stdout captured |
+| `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
+| `dbg.cleanup(keep_snaps=None)` | Delete old trace snapshots via `TraceSnapshot.delete()` to compact the `.DBTrace` file (keeps current snap by default) |
+| `dbg.detach()` | Clean target disconnect (interrupt → DETACH → close trace → close TraceRMI connection); keeps the debuggee process alive |
 | `dbg.get_threads()` | List all `TraceThread` objects in the active trace |
 | `dbg.get_thread()` / `dbg.get_snap()` | Current thread and snapshot index |
+| `dbg.get_event_thread()` | The faulting thread that caused the current break: `{tid, name, key, thread}` (`thread` is the raw `TraceThread` for `get_registers(thread=…)`) — not the parked worker `get_thread()` often returns |
+| `dbg.list_modules(name_filter=None)` | Loaded modules with runtime base addresses: `[{name, base, length, path}]` — essential for ASLR conversion |
+| `dbg.last_event()` | Exception/event that caused the break: `{code, first_chance, thread_id, description, raw}` (code as int, e.g. `0xc0000409`) |
 | `dbg.get_registers(thread, frame, snap)` | Register values as `{name: int}` dict |
+| `dbg.event_registers()` | Registers of the faulting thread via dbgeng `r` — reliable on a break (avoids trace-register-space staleness) |
 | `dbg.refresh_registers()` | Force live register read from target into trace |
 | `dbg.write_register(name, value)` | Write a register value (requires RW control mode) |
-| `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string |
-| `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace |
-| `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory |
+| `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string; accepts EITHER static or live address (auto-translated) |
+| `dbg.read_bytes(addr, n)` | Read `n` bytes as a Python `bytes` object (refreshes from target by default) |
+| `dbg.read_u64/read_u32(addr)` / `dbg.read_ptr(addr)` / `dbg.read_int(addr, size, signed)` | Typed little-endian scalar reads (int) for chasing pointer chains and fields |
+| `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace; accepts either address space |
+| `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory; accepts either address space |
 | `dbg.resume()` / `dbg.interrupt()` | Resume or suspend the target |
 | `dbg.step_into()` / `dbg.step_over()` / `dbg.step_out()` | Single-step execution |
 | `dbg.kill()` | Kill the target process |
-| `dbg.list_breakpoints()` | All logical breakpoints: `[{address, state, kinds, length}]` |
-| `dbg.set_breakpoint(addr, length, name)` | Place a software-execute breakpoint |
-| `dbg.delete_breakpoints(addr)` | Remove all breakpoints at an address |
-| `dbg.get_stack(thread, snap)` | Stack frames: `[{level, pc}]` |
+| `dbg.list_breakpoints()` | All logical breakpoints: `[{address: '0x...', state, kinds, length, name}]` |
+| `dbg.set_breakpoint(addr, length, name, raw=False)` | Logical breakpoint at a static Ghidra address (auto-mapped); returns `{ok, address, state, message}`. `raw=True` issues a dbgeng `bp` on a runtime address — for unmapped/system modules (d3d11.dll, ntdll) not loaded as static programs |
+| `dbg.set_raw_breakpoint(rt_addr, kind='e')` | dbgeng `bp` (execute) or `ba` (hardware r/w data) directly on a runtime address, bypassing static mapping; returns `{ok, address, command, output}` |
+| `dbg.remove_raw_breakpoint(rt_addr)` | Remove the raw dbgeng breakpoint at a runtime address (pairs with `set_raw_breakpoint`); returns `{ok, address, removed, output}` |
+| `dbg.delete_breakpoints(addr)` | Remove all *logical* breakpoints at a static address (also clears program-side `BreakpointMarker` bookmarks); returns `{ok, address, deleted, message}` |
+| `dbg.set_exception_filter(code, disposition)` | Control dbgeng exception handling: `break`(sxe)/`second`(sxd)/`notify`(sxn)/`ignore`(sxi). `code` is an int (`0xc0000409`) or filter name (`av`,`sbo`). Returns `{ok, command, output}`. Catch one exception in a storm |
+| `dbg.list_exception_filters()` | Current exception/event filter dispositions (dbgeng `sx`) |
+| `dbg.ensure_static_mapping()` | Add (or update) the trace ↔ program static mapping required for breakpoints to resolve; called automatically by `set_breakpoint` |
+| `dbg.get_stack(thread, snap, walk=True)` | Backtrace. Trace-recorded frames are `{level, pc}`; with `walk` and a live session returns the full parsed dbgeng `k` walk `[{level, stack_ptr, ret_addr, location, module, symbol}]` |
+
+**Address spaces.** `dbg.set_breakpoint` / `delete_breakpoints` take static Ghidra addresses (auto-mapped to live via the trace). The memory methods (`read_memory`, `write_memory`, `refresh_memory`) accept *either* a static or a live address and translate automatically when the value falls in `currentProgram`'s image range. If `read_memory` returns all zeros for a known-mapped region, the page is "cold" — call `refresh_memory(addr, length)` first.
+
+**Multi-version projects.** Program↔module matching defaults to an exact file-name match, so a wrong-version binary is never bound silently. When a program is loaded under a name that differs from the live module (e.g. program `SkyrimSE.1170.exe` vs live module `SkyrimSE.exe`), bind it explicitly with `dbg.use_image("SkyrimSE.exe")` or `reng.use_image("SkyrimSE.exe")` (pass `None` to reset). The override applies to `reng.image_base()`, `ensure_static_mapping`, and memory address translation.
+
+**Raw engine passthrough.** `dbg.execute()` runs any dbgeng/WinDbg command and returns its text output. It is the keystone behind `last_event`, `set_exception_filter`, raw breakpoints, and the `get_stack` backtrace fallback — and is available directly for anything the structured helpers don't cover (`!analyze -v`, `dt`, `u`, `!teb`, etc.).
+
+A `reng` helper object is pre-injected for reverse-engineering workflows. Works with or without a live debugger session; some methods require dynamic state, others operate purely on static analysis.
+
+**ASLR address conversion:**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.image_base()` | Runtime image base of `currentProgram` (canonical, from trace module manager; falls back to thread-name parsing if modules aren't enumerated yet) |
+| `reng.to_rt(static_addr)` | Convert static Ghidra address → live runtime address |
+| `reng.to_static(rt_addr)` | Convert live runtime address → static Ghidra address |
+| `reng.use_image(name)` / `dbg.use_image(name)` | Bind `currentProgram` to a differently-named live module (multi-version projects); `None` resets to exact same-name matching |
+
+**RTTI inspection (MSVC x64):**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.rtti(rt_obj_ptr)` | Decode the C++ class name of a live object pointer (reads `vtable[-8]` → `RTTICompleteObjectLocator` → `TypeDescriptor`) |
+| `reng.class_hierarchy(rt_ptr)` | Full inheritance chain: `[{class, offset, index}]` ordered base → derived |
+| `reng.vtable_methods(rt_ptr, max=128)` | List vtable slots: `[{slot, rt, static, name, named}]` — `name` comes from Ghidra analysis |
+| `reng.scan_vtables(prog=None)` | Scan `.rdata` for all RTTI vtables; returns `{vtable_static_addr: class_name}` (cached per program) |
+| `reng.rename_vfuncs(vtable_map=None, dry_run=False)` | Bulk-rename `FUN_*` into `ClassName::vfunc_N` using `scan_vtables` map |
+
+**ReClass.NET-style struct exploration** (backed by Ghidra's `DataTypeManager` — no parallel store; reads from and writes to the existing DTM):
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.explore(rt_addr, size=256)` | Field table at a live address; inherited fields tagged `(from ClassName)`; auto-detects vtable / fn-ptrs / sub-object pointers / nulls / floats |
+| `reng.follow(rt_addr, offset)` | Dereference the pointer at `[rt_addr+offset]` and `explore()` the sub-object |
+| `reng.tree(rt_addr, depth=2, max_ptrs=8, size=128)` | Recursive exploration that follows pointer fields |
+| `reng.diff(rt_addr1, rt_addr2, size=256, threshold=0)` | Compare two instances; returns differing 8-byte slots — the "damage one Actor, diff to find health" technique |
+| `reng.as_array(rt_addr, offset, count, type_str='f32')` | Read N consecutive typed values (`f32`/`u32`/`ptr`/...) |
+| `reng.as_known(rt_addr, offset, struct_name)` | Read an inline embedded sub-struct using a Ghidra DataType name (e.g. `NiPoint3` for an embedded XYZ) |
+| `reng.read_struct(rt_addr, {fname: (off, type)})` | Read named fields from an explicit field map |
+| `reng.find_type_at(rt_addr, offset, size=8)` | Cross-reference a single field against Ghidra's view (function? known vtable? small int? float?) |
+
+**Struct authoring (C++ inheritance-aware):**
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.define_class(name, own_fields, base_class=None, total_size=None, category='/')` | Create/update a struct with proper inheritance — embeds `base_class` at offset 0 so the decompiler shows `this->BaseClass_base.field` |
+| `reng.build_hierarchy(rt_ptr)` | Auto-build the full RTTI inheritance chain in the DTM (e.g. `TESForm → TESObjectREFR → Actor`); preserves existing named fields |
+| `reng.define_struct(name, fields, category='/')` | Flat struct (no inheritance) — for simple/value types; call with `fields={}` to inspect current definition |
+| `reng.patch_struct(name, fields, force=False)` | Targeted field update for partially RE'd projects: overwrites provisional names (`unk*`/`pad*`/`gap*`/`field_*`) freely; `force=True` to overwrite established names |
+| `reng.is_provisional(field_name)` | True if name matches `reng.PROVISIONAL_PREFIXES` (configurable per project) |
+| `reng.apply_struct(addr, struct_name, is_runtime=False)` | Apply a Ghidra DataType to an address in the Listing view |
+| `reng.rename_function(static_addr, new_name, namespace=None)` | Rename a function (USER_DEFINED source; survives re-analysis); optional class namespace |
+
+**Script management** (prefer the `scripts` MCP tool for interactive use; these helpers exist for use inside `eval_python`):
+
+| Helper | Description |
+| ------ | ----------- |
+| `reng.save_script(name, code, category='MCP', description='')` | Save to `~/ghidra_scripts/`; prepends `@category`/`@description` metadata |
+| `reng.list_scripts(pattern=None)` | List scripts: `[{name, path, category, description}]` |
+| `reng.load_script(name)` | Read script source for review/editing |
+| `reng.run_script(name)` | Execute existing script in the current Ghidra context |
 
 #### `debugger` - Debugger Session Management
 
