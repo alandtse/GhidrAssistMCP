@@ -371,28 +371,42 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 | Helper | Description |
 | ------ | ----------- |
 | `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}` |
+| `dbg.execute(cmd)` | Run a raw dbgeng/WinDbg command and return its output: `k`, `~`, `lm`, `sxd av`, `.lastevent`, `!analyze -v`, `bp …`. The keystone for engine features Ghidra doesn't surface |
+| `dbg.py_execute(python)` | Run raw Python in the ghidradbg backend process (`util`, `util.dbg` in scope); stdout captured |
 | `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
 | `dbg.cleanup(keep_snaps=None)` | Delete old trace snapshots via `TraceSnapshot.delete()` to compact the `.DBTrace` file (keeps current snap by default) |
 | `dbg.detach()` | Clean target disconnect (interrupt → DETACH → close trace → close TraceRMI connection); keeps the debuggee process alive |
 | `dbg.get_threads()` | List all `TraceThread` objects in the active trace |
 | `dbg.get_thread()` / `dbg.get_snap()` | Current thread and snapshot index |
+| `dbg.get_event_thread()` | The `TraceThread` that caused the current break (the faulting thread) — not the parked worker `get_thread()` often returns |
 | `dbg.list_modules(name_filter=None)` | Loaded modules with runtime base addresses: `[{name, base, length, path}]` — essential for ASLR conversion |
+| `dbg.last_event()` | Exception/event that caused the break: `{code, first_chance, thread_id, description, raw}` (code as int, e.g. `0xc0000409`) |
 | `dbg.get_registers(thread, frame, snap)` | Register values as `{name: int}` dict |
+| `dbg.event_registers()` | Registers of the faulting thread via dbgeng `r` — reliable on a break (avoids trace-register-space staleness) |
 | `dbg.refresh_registers()` | Force live register read from target into trace |
 | `dbg.write_register(name, value)` | Write a register value (requires RW control mode) |
 | `dbg.read_memory(addr, length, snap)` | Read bytes from trace memory as hex string; accepts EITHER static or live address (auto-translated) |
+| `dbg.read_bytes(addr, n)` | Read `n` bytes as a Python `bytes` object (refreshes from target by default) |
+| `dbg.read_u64/read_u32(addr)` / `dbg.read_ptr(addr)` / `dbg.read_int(addr, size, signed)` | Typed little-endian scalar reads (int) for chasing pointer chains and fields |
 | `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace; accepts either address space |
 | `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory; accepts either address space |
 | `dbg.resume()` / `dbg.interrupt()` | Resume or suspend the target |
 | `dbg.step_into()` / `dbg.step_over()` / `dbg.step_out()` | Single-step execution |
 | `dbg.kill()` | Kill the target process |
 | `dbg.list_breakpoints()` | All logical breakpoints: `[{address: '0x...', state, kinds, length, name}]` |
-| `dbg.set_breakpoint(addr, length, name)` | Place a software-execute breakpoint at a static Ghidra address; returns `{ok, address: '0x...', state, message}` with verification |
+| `dbg.set_breakpoint(addr, length, name, raw=False)` | Logical breakpoint at a static Ghidra address (auto-mapped); returns `{ok, address, state, message}`. `raw=True` issues a dbgeng `bp` on a runtime address — for unmapped/system modules (d3d11.dll, ntdll) not loaded as static programs |
+| `dbg.set_raw_breakpoint(rt_addr, kind='e')` | dbgeng `bp` (execute) or `ba` (hardware r/w data) directly on a runtime address, bypassing static mapping |
 | `dbg.delete_breakpoints(addr)` | Remove all breakpoints at an address (also clears program-side `BreakpointMarker` bookmarks); returns `{ok, address, deleted, message}` |
+| `dbg.set_exception_filter(code, disposition)` | Control dbgeng exception handling: `break`(sxe)/`second`(sxd)/`notify`(sxn)/`ignore`(sxi). `code` is an int (`0xc0000409`) or filter name (`av`,`sbo`). Catch one exception in a storm |
+| `dbg.list_exception_filters()` | Current exception/event filter dispositions (dbgeng `sx`) |
 | `dbg.ensure_static_mapping()` | Add (or update) the trace ↔ program static mapping required for breakpoints to resolve; called automatically by `set_breakpoint` |
-| `dbg.get_stack(thread, snap)` | Stack frames: `[{level, pc}]` |
+| `dbg.get_stack(thread, snap, walk=True)` | Backtrace `[{level, pc}]`; with `walk` and a live session, attaches a full dbgeng `k` unwind under a `backend` key when the trace records only the top frame |
 
 **Address spaces.** `dbg.set_breakpoint` / `delete_breakpoints` take static Ghidra addresses (auto-mapped to live via the trace). The memory methods (`read_memory`, `write_memory`, `refresh_memory`) accept *either* a static or a live address and translate automatically when the value falls in `currentProgram`'s image range. If `read_memory` returns all zeros for a known-mapped region, the page is "cold" — call `refresh_memory(addr, length)` first.
+
+**Multi-version projects.** Program↔module matching is version-tolerant: a program loaded as `SkyrimSE.1170.exe` still matches a live module reported as `SkyrimSE.exe` (matched by base name before the first dot), while distinct binaries (`SkyrimSE`/`SkyrimVR`, `Fallout4`/`Fallout4VR`) stay separate. `reng.image_base()`, `ensure_static_mapping`, and the memory address translation all use this.
+
+**Raw engine passthrough.** `dbg.execute()` runs any dbgeng/WinDbg command and returns its text output. It is the keystone behind `last_event`, `set_exception_filter`, raw breakpoints, and the `get_stack` backtrace fallback — and is available directly for anything the structured helpers don't cover (`!analyze -v`, `dt`, `u`, `!teb`, etc.).
 
 A `reng` helper object is pre-injected for reverse-engineering workflows. Works with or without a live debugger session; some methods require dynamic state, others operate purely on static analysis.
 
