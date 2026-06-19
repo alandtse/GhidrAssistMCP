@@ -741,6 +741,43 @@ class DebuggerHelpers:
                     result[0]['backend'] = bt
             return result
         except Exception as e: return [{'error': str(e)}]
+    def get_event_thread(self):
+        '''The TraceThread that caused the current break (the faulting thread),
+        or None. Reads Sessions root attribute `_event_thread`, which the dbgeng
+        backend updates on every break. This is the thread you want registers for
+        after an exception — get_thread() often returns a parked worker instead.'''
+        try:
+            from ghidra.trace.model.thread import TraceThread
+            trace = self.get_trace()
+            if trace is None: return None
+            snap = self.get_snap()
+            root = trace.getObjectManager().getRootObject()
+            v = root.getValue(snap, '_event_thread')
+            if v is None: return None
+            child = v.getValue()
+            try: return child.queryInterface(TraceThread)
+            except Exception: return None
+        except Exception: return None
+
+    def event_registers(self):
+        '''Registers of the event/faulting thread as {name: int}, read via the
+        dbgeng `r` command (execute keystone). Reliable on a break: dbgeng makes
+        the event thread current, so `r` always reports the faulting thread —
+        avoids the trace-register-space staleness that makes get_registers()
+        return a parked worker. Returns {name: int} or {error:...}.'''
+        try:
+            import re as _re
+            raw = self.execute('r')
+            if not isinstance(raw, str) or raw.startswith('error'):
+                return {'error': raw or 'no output'}
+            regs = {}
+            # WinDbg `r` prints "name=hexval" pairs, multiple per line
+            for name, val in _re.findall(r'([a-z][a-z0-9]+)=([0-9a-fA-F`]+)', raw):
+                try: regs[name] = int(val.replace('`', ''), 16)
+                except Exception: pass
+            return regs if regs else {'raw': raw.strip()}
+        except Exception as e: return {'error': str(e)}
+
     def last_event(self):
         '''Info about the event that caused the current break (dbgeng .lastevent).
         Essential for distinguishing a benign first-chance exception from the
