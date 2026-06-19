@@ -252,6 +252,67 @@ class DebuggerHelpers:
         if not trace: return []
         return list(trace.getThreadManager().getAllThreads())
 
+    def get_connection(self):
+        '''Active TraceRmiConnection for the current trace, or None.
+        The connection exposes the backend's registered RemoteMethods
+        (getMethods().all()) — the gateway for py_execute / execute.'''
+        try:
+            from ghidra.app.services import TraceRmiService
+            trace = self.get_trace()
+            svc = self._tool().getService(TraceRmiService)
+            if svc is None or trace is None: return None
+            for c in svc.getAllConnections():
+                try:
+                    if c.getTrace() == trace: return c
+                except Exception: pass
+            # Fall back to the sole connection if trace match is unavailable
+            conns = list(svc.getAllConnections())
+            return conns[0] if len(conns) == 1 else None
+        except Exception: return None
+
+    def _remote_method(self, name):
+        '''Look up a backend RemoteMethod by name, or None.'''
+        conn = self.get_connection()
+        if conn is None: return None
+        try:
+            return conn.getMethods().get(name)
+        except Exception: return None
+
+    def py_execute(self, python_code, to_string=True):
+        '''Run raw Python in the live debugger backend (ghidradbg) process.
+        This is the keystone passthrough: it invokes the backend's "execute"
+        RemoteMethod over TraceRMI. The backend has `util` (ghidradbg.util)
+        and `util.dbg` (the dbgeng wrapper) in scope.
+        to_string=True captures the backend's stdout and returns it as a string.
+        Returns the captured output (str) or an error string.
+        Most callers want dbg.execute() for dbgeng commands instead.'''
+        try:
+            import java.util.HashMap as _JMap
+            m = self._remote_method('execute')
+            if m is None:
+                return 'error: no "execute" remote method (backend not dbgeng or not connected)'
+            args = _JMap()
+            args.put('cmd', python_code)
+            args.put('to_string', bool(to_string))
+            result = m.invoke(args)
+            return result if result is not None else ''
+        except Exception as e: return 'error: ' + str(e)
+
+    def execute(self, dbgeng_cmd):
+        '''Run a raw dbgeng (WinDbg engine) command and return its output.
+        Examples: dbg.execute("k"), dbg.execute("~"), dbg.execute("sxd av"),
+        dbg.execute(".lastevent"), dbg.execute("!analyze -v"),
+        dbg.execute("bp 0x7ff8...").
+        Routes through py_execute -> ghidradbg util.dbg.cmd(), which captures
+        the command's output. Returns the output string, or an error string.'''
+        # Marshal the command into a backend Python call. util.dbg.cmd captures
+        # and returns the command output; we write it to stdout so the execute
+        # RemoteMethod's to_string capture returns it to us.
+        py = ('from ghidradbg import util as _u\n'
+              'import sys as _sys\n'
+              '_sys.stdout.write(_u.dbg.cmd(%r))\n' % str(dbgeng_cmd))
+        return self.py_execute(py, to_string=True)
+
     def list_modules(self, name_filter=None):
         '''Loaded modules with runtime base addresses — essential for ASLR conversion.
         Live process addresses ≠ Ghidra static addresses. To convert a static address
