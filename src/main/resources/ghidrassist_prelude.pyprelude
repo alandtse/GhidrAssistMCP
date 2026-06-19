@@ -741,6 +741,33 @@ class DebuggerHelpers:
                     result[0]['backend'] = bt
             return result
         except Exception as e: return [{'error': str(e)}]
+    def set_exception_filter(self, code, disposition='break'):
+        '''Control how dbgeng handles a specific exception code (sxe/sxd/sxn/sxi).
+        Essential when a noisy target throws benign first-chance exceptions that
+        re-break on every resume, never reaching the fatal one.
+        code: int exception code (e.g. 0xc0000409) or a dbgeng filter name
+              ('av' access violation, 'sbo' stack buffer overrun / 0xc0000409,
+              'sov' stack overflow, ...). See list_exception_filters() for names.
+              Numeric codes are emitted with a 0x prefix (dbgeng requires it).
+        disposition:
+          'break'  -> sxe : break on first chance (enable)
+          'second' -> sxd : break only on second chance (disable first-chance break)
+          'notify' -> sxn : notify (output) but do not break
+          'ignore' -> sxi : ignore entirely (no output, no break)
+        Returns the dbgeng output (str) or error string.
+        Tip: to catch only the fatal one in a storm — sxi/sxd the benign codes,
+        then set_exception_filter(0xc0000409, "break").'''
+        verb = {'break': 'sxe', 'second': 'sxd', 'notify': 'sxn', 'ignore': 'sxi'}.get(disposition)
+        if verb is None:
+            return "error: disposition must be break|second|notify|ignore"
+        # dbgeng requires a 0x prefix for raw numeric codes; names pass through.
+        code_str = code if isinstance(code, str) else ('0x%x' % code)
+        return self.execute('%s %s' % (verb, code_str))
+
+    def list_exception_filters(self):
+        '''Show current exception/event filter dispositions (dbgeng sx). Returns text.'''
+        return self.execute('sx')
+
     def get_event_thread(self):
         '''The TraceThread that caused the current break (the faulting thread),
         or None. Reads Sessions root attribute `_event_thread`, which the dbgeng
