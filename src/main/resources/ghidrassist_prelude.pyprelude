@@ -639,15 +639,41 @@ class DebuggerHelpers:
             return True
         except Exception: return False
 
-    def set_breakpoint(self, addr, length=1, name=''):
-        '''Place a software-execute breakpoint at the given STATIC Ghidra address.
+    def set_raw_breakpoint(self, rt_addr, kind='e'):
+        '''Set a breakpoint directly on a RUNTIME address via dbgeng `bp`/`ba`,
+        bypassing the logical/static-mapping requirement. Use this for addresses
+        in modules that are NOT loaded as static programs in the Ghidra project
+        (e.g. d3d11.dll, ntdll) — set_breakpoint() can't map those.
+        rt_addr: live runtime address (int or hex string). NOT auto-translated —
+                 pass the actual runtime address (use reng.to_rt for your program,
+                 or dbg.list_modules() + offset for system DLLs).
+        kind: 'e' execute (bp), or 'r1'/'w1'/'r4'/'w4'... for a hardware data
+              breakpoint (ba <r|w> <size>). Default 'e'.
+        Returns dbgeng output (str). Verify/clear with dbg.execute("bl")/("bc *").'''
+        a = rt_addr if isinstance(rt_addr, int) else int(str(rt_addr).replace('0x','').replace('0X',''), 16)
+        if kind == 'e':
+            return self.execute('bp 0x%x' % a)
+        # hardware breakpoint: ba <access> <size> <addr>, e.g. kind='w4' -> ba w 4
+        access = kind[0]
+        size = kind[1:] if len(kind) > 1 else '1'
+        return self.execute('ba %s %s 0x%x' % (access, size, a))
+
+    def set_breakpoint(self, addr, length=1, name='', raw=False):
+        '''Place a software-execute breakpoint.
         addr: int (e.g. 0x1406c2140) or hex string.
-        Returns a dict with the actual state after placement so the caller can
-        confirm success without a separate list_breakpoints() round-trip:
-            {ok: bool, address: '0x...', state: '...', message: '...'}
-        state values: ENABLED (live and armed), INEFFECTIVE_ENABLED (placed but
-        target's static mapping/control mode prevents it from firing), or absent
-        if the placement raised. Auto-establishes static-to-trace mapping.'''
+        raw=False (default): logical breakpoint at a STATIC Ghidra address,
+          auto-mapped to the live target. Returns a dict with the actual state:
+            {ok, address: '0x...', state, message}
+          state: ENABLED (armed), INEFFECTIVE_ENABLED (placed, not yet armed).
+        raw=True: route to set_raw_breakpoint() — a dbgeng `bp` on the given
+          RUNTIME address, bypassing static mapping. Use for unmapped/system
+          modules (d3d11.dll, ntdll) that aren't static programs in the project.
+          Returns {ok, address, raw: True, output}.'''
+        if raw:
+            out = self.set_raw_breakpoint(addr, 'e')
+            a = addr if isinstance(addr, int) else int(str(addr).replace('0x','').replace('0X',''),16)
+            ok = isinstance(out, str) and 'OSError' not in out and not out.startswith('error')
+            return {'ok': ok, 'address': '0x%x' % a, 'raw': True, 'output': out}
         try:
             from ghidra.trace.model.breakpoint import TraceBreakpointKind
             svc = self.get_bp_service()
