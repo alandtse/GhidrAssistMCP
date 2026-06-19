@@ -445,6 +445,36 @@ class DebuggerHelpers:
             target.readMemory(aset, monitor)
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
+    def read_bytes(self, addr, length, snap=None, refresh=True):
+        '''Read `length` bytes and return a Python bytes object (not a hex string).
+        refresh=True fetches from the live target first (avoids cold-page zeros).
+        Accepts static or live addresses.'''
+        try:
+            if refresh: self.refresh_memory(addr, length)
+            hex_str = self.read_memory(addr, length, snap)
+            if isinstance(hex_str, str) and hex_str.startswith('error'): return hex_str
+            if not isinstance(hex_str, str): return b''
+            return bytes(int(hex_str[i:i+2], 16) for i in range(0, len(hex_str) - 1, 2))
+        except Exception as e: return 'error: ' + str(e)
+    def read_int(self, addr, size=8, signed=False, snap=None, refresh=True):
+        '''Read an integer of `size` bytes (little-endian). Returns int or error string.
+        size: 1/2/4/8. signed=True for two's-complement interpretation.'''
+        try:
+            b = self.read_bytes(addr, size, snap, refresh)
+            if not isinstance(b, (bytes, bytearray)): return b  # error string
+            if len(b) < size: return 'error: short read (%d of %d bytes)' % (len(b), size)
+            return int.from_bytes(b[:size], 'little', signed=signed)
+        except Exception as e: return 'error: ' + str(e)
+    def read_u64(self, addr, snap=None, refresh=True):
+        '''Read an unsigned 64-bit little-endian value. Returns int or error string.'''
+        return self.read_int(addr, 8, False, snap, refresh)
+    def read_u32(self, addr, snap=None, refresh=True):
+        '''Read an unsigned 32-bit little-endian value. Returns int or error string.'''
+        return self.read_int(addr, 4, False, snap, refresh)
+    def read_ptr(self, addr, snap=None, refresh=True):
+        '''Read a pointer-sized (8-byte) value and return it as a live runtime int.
+        Alias of read_u64 for readability when chasing pointer chains.'''
+        return self.read_int(addr, 8, False, snap, refresh)
     def _do_action(self, action_name_field, thread=None):
         '''Internal: dispatch a named action (RESUME/STEP_INTO/etc.) via Target.collectActions.
         Mirrors FlatDebuggerAPI.doThreadAction / doTraceAction.'''
