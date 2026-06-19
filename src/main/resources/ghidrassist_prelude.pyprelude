@@ -706,18 +706,39 @@ class DebuggerHelpers:
             msg = '' if not remaining else 'warning: %d logical breakpoint(s) still listed at this address' % len(remaining)
             return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': msg}
         except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
-    def get_stack(self, thread=None, snap=None):
-        '''Stack frames for the current (or given) thread as list of {level, pc} dicts.
-        pc is raw program-counter from the trace; use static mapping to resolve to symbols.'''
+    def get_stack(self, thread=None, snap=None, walk=True):
+        '''Backtrace for the current (or given) thread as a list of {level, pc} dicts.
+        pc is formatted as a 0x... hex string (runtime address).
+        The trace often records only the top frame; with walk=True (default) and a
+        live dbgeng session, falls back to the backend `k` command for a full
+        backtrace, returned under a 'backend' key on the first entry.
+        Returns [] if no frames, or [{error:...}] on failure.'''
         try:
             if thread is None: thread = self.get_thread()
             if snap is None: snap = self.get_snap()
             if thread is None: return [{'error': 'no active thread'}]
-            stack = thread.getStack(snap)
-            if not stack: return []
             result = []
-            for i, frame in enumerate(stack.getFrames()):
-                result.append({'level': i, 'pc': hex(frame.getProgramCounter())})
+            stack = thread.getStack(snap, False) if hasattr(thread, 'getStack') else None
+            frames = []
+            if stack is not None:
+                try: frames = list(stack.getFrames(snap))
+                except Exception:
+                    try: frames = list(stack.getFrames())
+                    except Exception: frames = []
+            for i, frame in enumerate(frames):
+                try:
+                    pc = frame.getProgramCounter()
+                    # getProgramCounter returns a Ghidra Address — format via getOffset
+                    pc_str = '0x%x' % pc.getOffset() if pc is not None else None
+                except Exception:
+                    pc_str = None
+                result.append({'level': i, 'pc': pc_str})
+            # If the trace gave us a sparse stack, ask the backend for a real walk
+            if walk and len(result) <= 1 and self.get_connection() is not None:
+                bt = self.execute('k')
+                if isinstance(bt, str) and not bt.startswith('error'):
+                    if not result: result = [{'level': 0, 'pc': None}]
+                    result[0]['backend'] = bt
             return result
         except Exception as e: return [{'error': str(e)}]
     def write_register(self, name, value, thread=None, frame=0, snap=None):
