@@ -5,6 +5,33 @@ import ghidra.program.model.symbol.SourceType as SourceType
 try:
     from ghidra.feature.vt.api.main import VTSession, VTMatchInfo
 except: pass
+
+def _mod_basename(name):
+    '''Filename portion of a module/program name or path, lowercased.'''
+    return str(name).replace('\\', '/').rsplit('/', 1)[-1].lower()
+
+# Per-program overrides binding a Ghidra program to a differently-named live
+# trace module. Keyed by program basename. Empty = match the same file name.
+_IMAGE_OVERRIDES = {}
+
+def set_image_override(prog_name, module_name):
+    '''Bind a Ghidra program to a live module whose file name differs.
+    module_name=None clears the override. See dbg.use_image / reng.use_image.'''
+    key = _mod_basename(prog_name)
+    if module_name is None:
+        _IMAGE_OVERRIDES.pop(key, None)
+    else:
+        _IMAGE_OVERRIDES[key] = _mod_basename(module_name)
+
+def module_name_matches(module_name, prog_name):
+    '''True if a live trace module is the image for a Ghidra program.
+    Default is an exact file-name match, so a wrong-version binary is never
+    bound silently. To map a program to a differently-named live module (e.g.
+    program SkyrimSE.1170.exe -> live module SkyrimSE.exe in a multi-version
+    project), set an explicit override via set_image_override / use_image.'''
+    target = _IMAGE_OVERRIDES.get(_mod_basename(prog_name), _mod_basename(prog_name))
+    return _mod_basename(module_name) == target
+
 class GhidraHelpers:
     def get_program(self, name):
         '''Return the Program object for a program name if it is open in Ghidra.'''
@@ -263,6 +290,76 @@ class DebuggerHelpers:
         if not trace: return []
         return list(trace.getThreadManager().getAllThreads())
 
+    def use_image(self, module_name):
+        '''Bind currentProgram to a live trace module whose file name differs,
+        for address translation and breakpoint mapping. The default matches the
+        same file name; use this for multi-version projects (e.g.
+        dbg.use_image("SkyrimSE.exe") when the program is loaded as
+        SkyrimSE.1170.exe). Pass None to reset to same-name matching.'''
+        set_image_override(currentProgram.getName(), module_name)
+        return _IMAGE_OVERRIDES.get(_mod_basename(currentProgram.getName()))
+
+    def get_connection(self):
+        '''Active TraceRmiConnection for the current trace, or None.
+        The connection exposes the backend's registered RemoteMethods
+        (getMethods().all()) — the gateway for py_execute / execute.'''
+        try:
+            from ghidra.app.services import TraceRmiService
+            trace = self.get_trace()
+            svc = self._tool().getService(TraceRmiService)
+            if svc is None or trace is None: return None
+            for c in svc.getAllConnections():
+                try:
+                    if c.getTrace() == trace: return c
+                except Exception: pass
+            # Fall back to the sole connection if trace match is unavailable
+            conns = list(svc.getAllConnections())
+            return conns[0] if len(conns) == 1 else None
+        except Exception: return None
+
+    def _remote_method(self, name):
+        '''Look up a backend RemoteMethod by name, or None.'''
+        conn = self.get_connection()
+        if conn is None: return None
+        try:
+            return conn.getMethods().get(name)
+        except Exception: return None
+
+    def py_execute(self, python_code, to_string=True):
+        '''Run raw Python in the live debugger backend (ghidradbg) process.
+        This is the keystone passthrough: it invokes the backend's "execute"
+        RemoteMethod over TraceRMI. The backend has `util` (ghidradbg.util)
+        and `util.dbg` (the dbgeng wrapper) in scope.
+        to_string=True captures the backend's stdout and returns it as a string.
+        Returns the captured output (str) or an error string.
+        Most callers want dbg.execute() for dbgeng commands instead.'''
+        try:
+            import java.util.HashMap as _JMap
+            m = self._remote_method('execute')
+            if m is None:
+                return 'error: no "execute" remote method (backend not dbgeng or not connected)'
+            args = _JMap()
+            args.put('cmd', python_code)
+            args.put('to_string', bool(to_string))
+            result = m.invoke(args)
+            return result if result is not None else ''
+        except Exception as e: return 'error: ' + str(e)
+
+    def execute(self, dbgeng_cmd):
+        '''Run a raw dbgeng (WinDbg engine) command and return its output.
+        Examples: dbg.execute("k"), dbg.execute("~"), dbg.execute("sxd av"),
+        dbg.execute(".lastevent"), dbg.execute("!analyze -v"),
+        dbg.execute("bp 0x7ff8...").
+        Routes through py_execute -> ghidradbg util.dbg.cmd(), which captures
+        the command's output. Returns the output string, or an error string.'''
+        # Marshal the command into a backend Python call. util.dbg.cmd captures
+        # and returns the command output; we write it to stdout so the execute
+        # RemoteMethod's to_string capture returns it to us.
+        py = ('from ghidradbg import util as _u\n'
+              'import sys as _sys\n'
+              '_sys.stdout.write(_u.dbg.cmd(%r))\n' % str(dbgeng_cmd))
+        return self.py_execute(py, to_string=True)
+
     def list_modules(self, name_filter=None):
         '''Loaded modules with runtime base addresses — essential for ASLR conversion.
         Live process addresses ≠ Ghidra static addresses. To convert a static address
@@ -338,26 +435,37 @@ class DebuggerHelpers:
         except Exception as e: return 'error: ' + str(e)
     def _resolve_live_addr(self, addr):
         '''Accept a static (Ghidra) or live (runtime) address and return a live int.
-        Logic: parse to int. If the value falls inside currentProgram's static image
-        range, translate to runtime via reng.image_base(). Otherwise treat as live.
-        This lets read_memory / refresh_memory / write_memory accept either.'''
+        Parse to int. If it falls inside currentProgram's static image range,
+        translate to runtime via the matching trace module; otherwise treat as live.
+        Raises ValueError if the address is in the static range but no live module
+        matches the program name — silently reading the untranslated static address
+        would return zeros that masquerade as a cold page. The message points at the
+        fix (use_image) and lists candidate modules.'''
         if isinstance(addr, int):
             addr_int = addr
         else:
-            s = str(addr).strip().lower()
-            addr_int = int(s, 16) if s.startswith('0x') else int(s, 16)
+            addr_int = int(str(addr).strip(), 16)
         if currentProgram:
             sb = currentProgram.getImageBase().getOffset()
             size = currentProgram.getMemory().getSize() if hasattr(currentProgram.getMemory(), 'getSize') else 0x10000000
             if sb <= addr_int < sb + size:
-                # Looks like a static address — translate to live via the trace module base
                 trace = self.get_trace()
                 snap = self.get_snap()
                 if trace is not None:
                     prog_name = currentProgram.getName()
                     for m in trace.getModuleManager().getAllModules():
-                        if str(m.getName(snap)).lower().endswith(prog_name.lower()):
+                        if module_name_matches(m.getName(snap), prog_name):
                             return addr_int - sb + m.getBase(snap).getOffset()
+                    all_mods = [_mod_basename(m.getName(snap)) for m in trace.getModuleManager().getAllModules()]
+                    stem = _mod_basename(prog_name).split('.')[0]
+                    # Surface the likely match (same base name) ahead of unrelated modules.
+                    likely = [n for n in all_mods if n.split('.')[0] == stem]
+                    others = [n for n in all_mods if n not in likely and n.endswith('.exe')]
+                    cands = (likely + others)[:8] or all_mods[:8]
+                    raise ValueError(
+                        '0x%x is in %s image range but no live module matches its name. '
+                        "Bind one with dbg.use_image('<module>'). Likely: %s"
+                        % (addr_int, prog_name, ', '.join(cands)))
         return addr_int
 
     def read_memory(self, addr, length, snap=None):
@@ -395,6 +503,36 @@ class DebuggerHelpers:
             target.readMemory(aset, monitor)
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
+    def read_bytes(self, addr, length, snap=None, refresh=True):
+        '''Read `length` bytes and return a Python bytes object (not a hex string).
+        refresh=True fetches from the live target first (avoids cold-page zeros).
+        Accepts static or live addresses.'''
+        try:
+            if refresh: self.refresh_memory(addr, length)
+            hex_str = self.read_memory(addr, length, snap)
+            if isinstance(hex_str, str) and hex_str.startswith('error'): return hex_str
+            if not isinstance(hex_str, str): return b''
+            return bytes(int(hex_str[i:i+2], 16) for i in range(0, len(hex_str) - 1, 2))
+        except Exception as e: return 'error: ' + str(e)
+    def read_int(self, addr, size=8, signed=False, snap=None, refresh=True):
+        '''Read an integer of `size` bytes (little-endian). Returns int or error string.
+        size: 1/2/4/8. signed=True for two's-complement interpretation.'''
+        try:
+            b = self.read_bytes(addr, size, snap, refresh)
+            if not isinstance(b, (bytes, bytearray)): return b  # error string
+            if len(b) < size: return 'error: short read (%d of %d bytes)' % (len(b), size)
+            return int.from_bytes(b[:size], 'little', signed=signed)
+        except Exception as e: return 'error: ' + str(e)
+    def read_u64(self, addr, snap=None, refresh=True):
+        '''Read an unsigned 64-bit little-endian value. Returns int or error string.'''
+        return self.read_int(addr, 8, False, snap, refresh)
+    def read_u32(self, addr, snap=None, refresh=True):
+        '''Read an unsigned 32-bit little-endian value. Returns int or error string.'''
+        return self.read_int(addr, 4, False, snap, refresh)
+    def read_ptr(self, addr, snap=None, refresh=True):
+        '''Read a pointer-sized (8-byte) value and return it as a live runtime int.
+        Alias of read_u64 for readability when chasing pointer chains.'''
+        return self.read_int(addr, 8, False, snap, refresh)
     def _do_action(self, action_name_field, thread=None):
         '''Internal: dispatch a named action (RESUME/STEP_INTO/etc.) via Target.collectActions.
         Mirrors FlatDebuggerAPI.doThreadAction / doTraceAction.'''
@@ -530,7 +668,7 @@ class DebuggerHelpers:
             # Find the matching trace module by program filename
             mod = None
             for m in trace.getModuleManager().getAllModules():
-                if str(m.getName(snap)).lower().endswith(prog_name.lower()):
+                if module_name_matches(m.getName(snap), prog_name):
                     mod = m; break
             if mod is None: return False
             mod_base   = mod.getBase(snap)
@@ -544,7 +682,7 @@ class DebuggerHelpers:
                 for entry in trace.getStaticMappingManager().getAllEntries():
                     entry_start = entry.getMinTraceAddress()
                     url = entry.getStaticProgramURL()
-                    if not (url and url.getPath().endswith(prog_name)): continue
+                    if not (url and module_name_matches(url.getPath(), prog_name)): continue
                     if entry_start.getOffset() == mod_base.getOffset():
                         return True  # exact same mapping, no-op
                     # Same program, different base = stale mapping from previous attach
@@ -559,15 +697,65 @@ class DebuggerHelpers:
             return True
         except Exception: return False
 
-    def set_breakpoint(self, addr, length=1, name=''):
-        '''Place a software-execute breakpoint at the given STATIC Ghidra address.
+    def set_raw_breakpoint(self, rt_addr, kind='e'):
+        '''Set a breakpoint directly on a RUNTIME address via dbgeng `bp`/`ba`,
+        bypassing the logical/static-mapping requirement. Use this for addresses
+        in modules that are NOT loaded as static programs in the Ghidra project
+        (e.g. d3d11.dll, ntdll) — set_breakpoint() can't map those.
+        rt_addr: live runtime address (int or hex string). NOT auto-translated —
+                 pass the actual runtime address (use reng.to_rt for your program,
+                 or dbg.list_modules() + offset for system DLLs).
+        kind: 'e' execute (bp), or 'r1'/'w1'/'r4'/'w4'... for a hardware data
+              breakpoint (ba <r|w> <size>). Default 'e'.
+        Returns {ok, address, command, output}. dbgeng prints nothing on a
+        successful bp/ba, so ok is derived from the absence of error text.
+        Remove with dbg.remove_raw_breakpoint(addr) or dbg.execute("bc *").'''
+        a = rt_addr if isinstance(rt_addr, int) else int(str(rt_addr).replace('0x','').replace('0X',''), 16)
+        if kind == 'e':
+            cmd = 'bp 0x%x' % a
+        else:
+            access = kind[0]
+            size = kind[1:] if len(kind) > 1 else '1'
+            cmd = 'ba %s %s 0x%x' % (access, size, a)
+        out = self.execute(cmd)
+        ok = isinstance(out, str) and 'OSError' not in out and not out.lower().lstrip().startswith('error')
+        return {'ok': ok, 'address': '0x%x' % a, 'command': cmd, 'output': out}
+
+    def remove_raw_breakpoint(self, rt_addr):
+        '''Remove the raw dbgeng breakpoint at a runtime address (matches set_raw_breakpoint).
+        Looks the id up in `bl` by address and clears it with `bc`.
+        Returns {ok, address, removed: [ids], output}.'''
+        import re as _re
+        a = rt_addr if isinstance(rt_addr, int) else int(str(rt_addr).replace('0x','').replace('0X',''), 16)
+        bl = self.execute('bl')
+        if not isinstance(bl, str): return {'ok': False, 'address': '0x%x' % a, 'output': str(bl)}
+        ids = []
+        for line in bl.splitlines():
+            # "  0 e 00007ffe`ffab10d0 ..."  — id is the first token, addr the 3rd
+            m = _re.match(r'\s*(\d+)\s+\S+\s+([0-9a-f`]+)', line)
+            if m and int(m.group(2).replace('`', ''), 16) == a:
+                ids.append(m.group(1))
+        if not ids:
+            return {'ok': False, 'address': '0x%x' % a, 'removed': [],
+                    'output': 'no breakpoint at this address in `bl`'}
+        out = self.execute('bc %s' % ' '.join(ids))
+        return {'ok': True, 'address': '0x%x' % a, 'removed': ids, 'output': out}
+
+    def set_breakpoint(self, addr, length=1, name='', raw=False):
+        '''Place a software-execute breakpoint.
         addr: int (e.g. 0x1406c2140) or hex string.
-        Returns a dict with the actual state after placement so the caller can
-        confirm success without a separate list_breakpoints() round-trip:
-            {ok: bool, address: '0x...', state: '...', message: '...'}
-        state values: ENABLED (live and armed), INEFFECTIVE_ENABLED (placed but
-        target's static mapping/control mode prevents it from firing), or absent
-        if the placement raised. Auto-establishes static-to-trace mapping.'''
+        raw=False (default): logical breakpoint at a STATIC Ghidra address,
+          auto-mapped to the live target. Returns a dict with the actual state:
+            {ok, address: '0x...', state, message}
+          state: ENABLED (armed), INEFFECTIVE_ENABLED (placed, not yet armed).
+        raw=True: route to set_raw_breakpoint() — a dbgeng `bp` on the given
+          RUNTIME address, bypassing static mapping. Use for unmapped/system
+          modules (d3d11.dll, ntdll) that aren't static programs in the project.
+          Returns {ok, address, raw: True, output}.'''
+        if raw:
+            r = self.set_raw_breakpoint(addr, 'e')
+            r['raw'] = True
+            return r
         try:
             from ghidra.trace.model.breakpoint import TraceBreakpointKind
             svc = self.get_bp_service()
@@ -626,20 +814,160 @@ class DebuggerHelpers:
             msg = '' if not remaining else 'warning: %d logical breakpoint(s) still listed at this address' % len(remaining)
             return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': msg}
         except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
-    def get_stack(self, thread=None, snap=None):
-        '''Stack frames for the current (or given) thread as list of {level, pc} dicts.
-        pc is raw program-counter from the trace; use static mapping to resolve to symbols.'''
+    def _parse_k(self, text):
+        '''Parse dbgeng `k` output into [{level, stack_ptr, ret_addr, location, module, symbol}].'''
+        import re as _re
+        frames = []
+        for line in text.splitlines():
+            m = _re.match(r'\s*([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+(\S.*)$', line)
+            if not m or 'Child-SP' in line: continue
+            sp = int(m.group(1).replace('`', ''), 16)
+            ret = int(m.group(2).replace('`', ''), 16)
+            loc = m.group(3).strip()
+            module = loc.split('!', 1)[0] if '!' in loc else None
+            symbol = loc.split('!', 1)[1] if '!' in loc else loc
+            frames.append({'level': len(frames), 'stack_ptr': '0x%x' % sp,
+                           'ret_addr': '0x%x' % ret, 'location': loc,
+                           'module': module, 'symbol': symbol})
+        return frames
+
+    def get_stack(self, thread=None, snap=None, walk=True):
+        '''Backtrace for the current (or given) thread.
+        Returns a list of frame dicts. Trace-recorded frames are {level, pc}
+        (pc a 0x... hex string). The trace often records only the top frame, so
+        with walk=True (default) and a live dbgeng session this returns the full
+        parsed backend walk: {level, stack_ptr, ret_addr, location, module, symbol}.
+        [] if no frames, [{error:...}] on failure.'''
         try:
             if thread is None: thread = self.get_thread()
             if snap is None: snap = self.get_snap()
             if thread is None: return [{'error': 'no active thread'}]
-            stack = thread.getStack(snap)
-            if not stack: return []
             result = []
-            for i, frame in enumerate(stack.getFrames()):
-                result.append({'level': i, 'pc': hex(frame.getProgramCounter())})
+            stack = thread.getStack(snap, False) if hasattr(thread, 'getStack') else None
+            frames = []
+            if stack is not None:
+                try: frames = list(stack.getFrames(snap))
+                except Exception:
+                    try: frames = list(stack.getFrames())
+                    except Exception: frames = []
+            for i, frame in enumerate(frames):
+                try:
+                    pc = frame.getProgramCounter()
+                    pc_str = '0x%x' % pc.getOffset() if pc is not None else None
+                except Exception:
+                    pc_str = None
+                result.append({'level': i, 'pc': pc_str})
+            # Trace usually records only the top frame; return the real backend walk.
+            if walk and len(result) <= 1 and self.get_connection() is not None:
+                bt = self.execute('k')
+                if isinstance(bt, str) and not bt.startswith('error'):
+                    parsed = self._parse_k(bt)
+                    if parsed: return parsed
             return result
         except Exception as e: return [{'error': str(e)}]
+    def set_exception_filter(self, code, disposition='break'):
+        '''Control how dbgeng handles a specific exception code (sxe/sxd/sxn/sxi).
+        Essential when a noisy target throws benign first-chance exceptions that
+        re-break on every resume, never reaching the fatal one.
+        code: int exception code (e.g. 0xc0000409) or a dbgeng filter name
+              ('av' access violation, 'sbo' stack buffer overrun / 0xc0000409,
+              'sov' stack overflow, ...). See list_exception_filters() for names.
+              Numeric codes are emitted with a 0x prefix (dbgeng requires it).
+        disposition:
+          'break'  -> sxe : break on first chance (enable)
+          'second' -> sxd : break only on second chance (disable first-chance break)
+          'notify' -> sxn : notify (output) but do not break
+          'ignore' -> sxi : ignore entirely (no output, no break)
+        Returns {ok, command, output}. dbgeng prints nothing on success, so ok
+        is derived from the absence of error text.
+        Tip: to catch only the fatal one in a storm — sxi/sxd the benign codes,
+        then set_exception_filter(0xc0000409, "break").'''
+        verb = {'break': 'sxe', 'second': 'sxd', 'notify': 'sxn', 'ignore': 'sxi'}.get(disposition)
+        if verb is None:
+            return {'ok': False, 'output': 'disposition must be break|second|notify|ignore'}
+        # dbgeng requires a 0x prefix for raw numeric codes; names pass through.
+        code_str = code if isinstance(code, str) else ('0x%x' % code)
+        cmd = '%s %s' % (verb, code_str)
+        out = self.execute(cmd)
+        ok = isinstance(out, str) and 'OSError' not in out and not out.lower().lstrip().startswith('error')
+        return {'ok': ok, 'command': cmd, 'output': out}
+
+    def list_exception_filters(self):
+        '''Show current exception/event filter dispositions (dbgeng sx). Returns text.'''
+        return self.execute('sx')
+
+    def get_event_thread(self):
+        '''Identify the thread that caused the current break (the faulting thread).
+        Reads the Sessions root `_event_thread` attribute, which the dbgeng backend
+        updates on every break — this is the thread you want registers for after an
+        exception (get_thread() often returns a parked worker).
+        Returns {tid, name, key, thread} (thread = the raw TraceThread for passing
+        to get_registers(thread=...)), or None if unavailable.'''
+        try:
+            from ghidra.trace.model.thread import TraceThread
+            trace = self.get_trace()
+            if trace is None: return None
+            snap = self.get_snap()
+            root = trace.getObjectManager().getRootObject()
+            v = root.getValue(snap, '_event_thread')
+            if v is None: return None
+            tt = None
+            try: tt = v.getValue().queryInterface(TraceThread)
+            except Exception: pass
+            if tt is None: return None
+            info = {'thread': tt, 'key': tt.getKey()}
+            try: info['name'] = tt.getName(snap)
+            except Exception: info['name'] = None
+            # tid is parsed from the name "<idx> [<tid hex>] module!sym (...)"
+            import re as _re
+            m = _re.search(r'\[([0-9a-fA-F]+)\]', info.get('name') or '')
+            info['tid'] = int(m.group(1), 16) if m else None
+            return info
+        except Exception: return None
+
+    def event_registers(self):
+        '''Registers of the event/faulting thread as {name: int}, read via the
+        dbgeng `r` command (execute keystone). Reliable on a break: dbgeng makes
+        the event thread current, so `r` always reports the faulting thread —
+        avoids the trace-register-space staleness that makes get_registers()
+        return a parked worker. Returns {name: int} or {error:...}.'''
+        try:
+            import re as _re
+            raw = self.execute('r')
+            if not isinstance(raw, str) or raw.startswith('error'):
+                return {'error': raw or 'no output'}
+            regs = {}
+            # WinDbg `r` prints "name=hexval" pairs, multiple per line
+            for name, val in _re.findall(r'([a-z][a-z0-9]+)=([0-9a-fA-F`]+)', raw):
+                try: regs[name] = int(val.replace('`', ''), 16)
+                except Exception: pass
+            return regs if regs else {'raw': raw.strip()}
+        except Exception as e: return {'error': str(e)}
+
+    def last_event(self):
+        '''Info about the event that caused the current break (dbgeng .lastevent).
+        Essential for distinguishing a benign first-chance exception from the
+        fatal one you are hunting. Returns
+        {code, first_chance, thread_id, description, raw} or {error:...}.
+        code is the exception/event code as an int (e.g. 0xc0000409); None for
+        non-exception events. thread_id is the dbgeng TID (hex in WinDbg output).'''
+        try:
+            import re as _re
+            raw = self.execute('.lastevent')
+            if not isinstance(raw, str) or raw.startswith('error'):
+                return {'error': raw or 'no output'}
+            out = {'raw': raw.strip()}
+            # "Last event: <pid>.<tid>: <desc> - code <hex> (first/second chance)"
+            m = _re.search(r'Last event:\s*([0-9a-fA-F]+)\.([0-9a-fA-F]+):\s*(.*)', raw)
+            if m:
+                out['thread_id'] = int(m.group(2), 16)
+                desc = m.group(3).strip()
+                out['description'] = desc
+                cm = _re.search(r'code\s+([0-9a-fA-F]+)', desc)
+                out['code'] = int(cm.group(1), 16) if cm else None
+                out['first_chance'] = ('first chance' in desc.lower())
+            return out
+        except Exception as e: return {'error': str(e)}
     def write_register(self, name, value, thread=None, frame=0, snap=None):
         '''Write a register value (int) for the current thread via StateEditor.
         Requires RW control mode (live target or emulation mode).'''
@@ -762,6 +1090,15 @@ class REngHelpers:
     def _prog_key(self):
         return currentProgram.getName() if currentProgram else None
 
+    def use_image(self, module_name):
+        '''Bind currentProgram to a live trace module whose file name differs,
+        so image_base/to_rt/to_static resolve in a multi-version project (e.g.
+        reng.use_image("SkyrimSE.exe") when the program is SkyrimSE.1170.exe).
+        Clears the cached base so the next image_base() re-resolves. None resets.'''
+        set_image_override(currentProgram.getName(), module_name)
+        self._image_base_cache.pop(self._prog_key(), None)
+        return _IMAGE_OVERRIDES.get(_mod_basename(currentProgram.getName()))
+
     def image_base(self):
         '''Runtime image base of currentProgram binary.
         Strategy: query the live trace's module manager (canonical, exact),
@@ -781,8 +1118,7 @@ class REngHelpers:
             if trace is not None:
                 snap = dbg.get_snap()
                 for m in trace.getModuleManager().getAllModules():
-                    mod_name = str(m.getName(snap))
-                    if mod_name.lower().endswith(prog_name.lower()):
+                    if module_name_matches(m.getName(snap), prog_name):
                         self._image_base_cache[key] = m.getBase(snap).getOffset()
                         return self._image_base_cache[key]
         except Exception: pass
