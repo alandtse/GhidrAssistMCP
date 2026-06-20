@@ -98,7 +98,7 @@ public class EvalPythonTool implements McpTool {
             "address — translated automatically. Use reng.to_rt/to_static for explicit conversion.\n" +
             "dbg.read_memory returning all zeros usually means cold page not yet captured —\n" +
             "call dbg.refresh_memory(addr, len) first.\n\n" +
-            "Companion MCP tools: `scripts` (Script Manager), `project` (open programs). " +
+            "Companion MCP tools: `scripts` (Script Manager), `open_program` (list/open project programs), `import_file`. " +
             "Debugger session management is all in dbg.* (attach/status/list_sessions/detach).";
     }
 

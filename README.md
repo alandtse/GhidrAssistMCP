@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Streamable HTTP Transport**: Implements the modern, single-endpoint Streamable HTTP transport
-- **48 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **47 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (48 total)
+- **View all available tools** (47 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -162,7 +162,7 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 48 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 47 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -176,15 +176,14 @@ GhidrAssistMCP provides 48 tools organized into categories. Several tools use an
 
 > **Security-sensitive tools:** `import_file` and `export_program` are disabled by default because they interact with the host filesystem. Enable them explicitly in the plugin configuration UI when needed.
 
-#### `project` - Project & Program Management
+#### `open_program` - Open / List Project Programs
 
-Open existing programs from the current Ghidra project, or import new binaries from disk. Useful for bootstrapping a session from MCP without touching the Ghidra UI.
+Bootstrap a session from MCP without the Ghidra GUI. `import_file` (above, disabled by default) adds new binaries from disk.
 
 | Action | Description |
 | ------ | ----------- |
-| `list_files` | List all programs already imported into the current Ghidra project |
-| `open` | Open an already-imported program in CodeBrowser by name (`name`, partial match supported) |
-| `import` | Import a new binary from disk and open it (`file_path`); reads arbitrary files from the host filesystem |
+| `list` | List all programs in the current Ghidra project |
+| `open` | Open a program in CodeBrowser by name (`name`, partial match supported) |
 
 #### `scripts` - Ghidra Script Management
 

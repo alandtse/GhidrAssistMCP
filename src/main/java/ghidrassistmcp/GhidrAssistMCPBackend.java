@@ -68,7 +68,6 @@ import ghidrassistmcp.tools.ProgramInfoTool;
 import ghidrassistmcp.tools.RenameSymbolBatchTool;
 import ghidrassistmcp.tools.RenameSymbolTool;
 import ghidrassistmcp.tools.PatchBytesTool;
-import ghidrassistmcp.tools.ProjectTool;
 import ghidrassistmcp.tools.ScriptsTool;
 import ghidrassistmcp.tools.SearchBytesTool;
 import ghidrassistmcp.tools.SearchFunctionsByNameTool;
@@ -90,8 +89,8 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private boolean agenticMode = true; // Default to true for token efficiency
     private static final java.util.Set<String> CORE_TOOLS = java.util.Set.of(
         "list_binaries", "eval_python", "get_task_status", "list_tasks", "cancel_task",
-        "scripts",   // script manager — list/read/write/run Ghidra scripts from MCP
-        "project"    // project/program management — open projects and binaries without touching the UI
+        "scripts",      // script manager — list/read/write/run Ghidra scripts from MCP
+        "open_program"  // list/open project programs — bootstrap a session without the GUI
     );
     private final List<McpEventListener> eventListeners = new CopyOnWriteArrayList<>();
     private volatile GhidrAssistMCPManager manager;
@@ -182,9 +181,6 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
         // Register script management tool
         registerTool(new ScriptsTool());
-
-        // Register project/program management tool
-        registerTool(new ProjectTool());
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }
