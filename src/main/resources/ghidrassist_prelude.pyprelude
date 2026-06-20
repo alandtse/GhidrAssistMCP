@@ -1437,6 +1437,14 @@ class REngHelpers:
         sb = currentProgram.getImageBase().getOffset() if currentProgram else 0x140000000
         return rt_addr - ib + sb if ib else None
 
+    def _is_static(self, addr_int):
+        '''True if addr_int lies within currentProgram's static image (a Ghidra
+        address), vs a live runtime address. Exact (checks the memory map).'''
+        try:
+            ds = currentProgram.getAddressFactory().getDefaultAddressSpace()
+            return currentProgram.getMemory().contains(ds.getAddress(addr_int))
+        except Exception: return False
+
     def _read_mem_static(self, static_addr, n):
         '''Read n bytes from static Ghidra program memory. Returns bytes or None.'''
         try:
@@ -1757,6 +1765,88 @@ class REngHelpers:
                 vtmap[ref.getFromAddress().getOffset() + 8] = class_name
         if key: self._vtable_cache[key] = vtmap
         return vtmap
+
+    def find_instances(self, class_or_vtable, ranges=None, max_hits=64,
+                       max_bytes=0x10000000, verify=True):
+        '''Locate LIVE instances of a class by finding its vtable pointer in target
+        memory. This is the instance-location step ReClass also lacks: reng.* and the
+        Ghidra GUI explore a struct once you HAVE an address — this gets you the address.
+        Pair it with reng.explore()/diff() to analyze the instances it returns.
+
+        class_or_vtable: a class name (resolved to its vtable via the RTTI scan) OR a
+          vtable address — static (Ghidra) or runtime int, auto-detected.
+        ranges: explicit [(start_rt, length), ...] to scan; default = committed heap /
+          private regions from dbg.list_regions().
+        max_bytes: total scan budget across auto-selected regions (default 256 MB).
+          Regions beyond the budget are reported in skipped, not silently dropped.
+        max_hits: stop after this many matches.
+        verify: confirm each hit's RTTI class matches (drops coincidental qword hits).
+
+        Scanning is via dbgeng `s` and can be slow over large heaps; on a frame-timed
+        VR target a long freeze kills the process (see dbg.snapshot / the issues doc) —
+        prefer a known-singleton walk there, or pass a tight `ranges`.
+        Returns {class, vtable_static, vtable_rt, instances:[addr...], detail,
+        scanned_regions, skipped_regions} or {error}.'''
+        try:
+            # 1. Resolve the vtable's runtime address (and class name when known).
+            cls = None; vt_static = None
+            if isinstance(class_or_vtable, str) and not class_or_vtable.strip().lower().startswith('0x'):
+                cls = class_or_vtable
+                for va, cn in self.scan_vtables().items():
+                    if cn == cls: vt_static = va; break
+                if vt_static is None:
+                    return {'error': 'no vtable for class in RTTI scan', 'class': cls}
+                vt_rt = self.to_rt(vt_static)
+            else:
+                v = class_or_vtable if isinstance(class_or_vtable, int) else \
+                    int(str(class_or_vtable).replace('0x', '').replace('0X', ''), 16)
+                if self._is_static(v):
+                    vt_static = v; vt_rt = self.to_rt(v); cls = self.scan_vtables().get(v)
+                else:
+                    vt_rt = v
+            if vt_rt is None:
+                return {'error': 'cannot resolve vtable runtime address '
+                                 '(no live session or ASLR base unknown)'}
+            # 2. Pick ranges to scan (bounded by max_bytes).
+            scanned, skipped = [], []
+            if ranges is None:
+                regs = dbg.list_regions()
+                if isinstance(regs, dict):
+                    return {'error': 'dbg.list_regions failed', 'detail': regs}
+                ranges = []; budget = max_bytes
+                for r in regs:
+                    usage = r.get('usage', '').lower()
+                    base = int(r['base'], 16); size = int(r['size'], 16)
+                    # C++ objects live in heap / private committed memory; skip image,
+                    # stack, mapped files, free, teb/peb to bound the scan.
+                    if not any(k in usage for k in ('heap', '<unknown>')):
+                        skipped.append({'base': r['base'], 'usage': usage, 'why': 'usage'}); continue
+                    if size > budget:
+                        skipped.append({'base': r['base'], 'usage': usage, 'why': 'budget'}); continue
+                    ranges.append((base, size)); budget -= size
+                    scanned.append({'base': r['base'], 'usage': usage, 'size': r['size']})
+            # 3. Search each range for the vtable pointer (qword at object offset 0).
+            hits = []
+            for (start, length) in ranges:
+                res = dbg.search_memory(vt_rt, start, length, 'q')
+                if isinstance(res, list): hits.extend(res)
+                if len(hits) >= max_hits: break
+            hits = hits[:max_hits]
+            # 4. Optionally verify each hit's RTTI matches the requested class.
+            detail = []
+            for h in hits:
+                e = {'addr': '0x%x' % h}
+                if verify and cls:
+                    rc = self.rtti(h); e['class'] = rc; e['ok'] = (rc == cls)
+                detail.append(e)
+            kept = [e for e in detail if e.get('ok')] if (verify and cls) else detail
+            if verify and cls and not kept: kept = detail  # report all if none verified
+            return {'class': cls,
+                    'vtable_static': ('0x%x' % vt_static) if vt_static else None,
+                    'vtable_rt': '0x%x' % vt_rt,
+                    'instances': [e['addr'] for e in kept], 'detail': kept,
+                    'scanned_regions': scanned, 'skipped_regions': skipped}
+        except Exception as e: return {'error': str(e)}
 
     def rename_vfuncs(self, vtable_map=None, dry_run=False):
         '''Bulk-rename FUN_* functions using vtable map from scan_vtables().

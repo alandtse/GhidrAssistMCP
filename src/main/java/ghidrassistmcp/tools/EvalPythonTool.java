@@ -93,8 +93,12 @@ public class EvalPythonTool implements McpTool {
             "dbg.search_memory(value,start,len)/list_regions to find instances, dbg.set_control_mode('RW_TARGET') " +
             "to arm bps, dbg.clear_all_breakpoints(), dbg.snapshot(addr,len,then='detach') for VR fast-capture, " +
             "dbg.detach() when done.\n" +
-            "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static), RTTI (rtti/class_hierarchy/vtable_methods), " +
-            "ReClass-style struct exploration (explore/follow/tree/diff/as_known/as_array), authoring " +
+            "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static — image_base is the canonical " +
+            "live slide, prefer it over list_modules which lags after attach), RTTI " +
+            "(rtti/class_hierarchy/vtable_methods), live instance location " +
+            "(find_instances(class_or_vtable) finds object instances in target memory), " +
+            "ReClass-style struct exploration over live trace memory " +
+            "(explore/follow/tree/diff/as_known/as_array), authoring " +
             "(define_class/define_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
             "Address handling: dbg.* memory + breakpoint methods accept EITHER a static\n" +
             "Ghidra address (0x14xxxxxxx in currentProgram's image range) OR a live runtime\n" +
