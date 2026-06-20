@@ -10,6 +10,19 @@ def _mod_basename(name):
     '''Filename portion of a module/program name or path, lowercased.'''
     return str(name).replace('\\', '/').rsplit('/', 1)[-1].lower()
 
+def _end_tx(program, tx):
+    '''End a write transaction, ALWAYS committing.
+
+    eval_python runs inside an outer Ghidra transaction (the PyGhidra script tx),
+    so any startTransaction here is nested. Ghidra's nesting is all-or-nothing:
+    a single endTransaction(..., commit=False) anywhere in the stack aborts the
+    WHOLE eval, silently reverting every other write in the run. So a helper must
+    never abort on its own error — it commits whatever it managed to write (the
+    DB mutations are single atomic calls, so a failed helper usually wrote nothing
+    anyway) and returns its error string. A poisoned whole-run rollback is far
+    worse.'''
+    program.endTransaction(tx, True)
+
 # Per-program overrides binding a Ghidra program to a differently-named live
 # trace module. Keyed by program basename. Empty = match the same file name.
 _IMAGE_OVERRIDES = {}
@@ -982,9 +995,9 @@ class DebuggerHelpers:
                     for bm in bm_mgr.getBookmarks(prog_addr):
                         if 'reakpoint' in str(bm.getType()) or 'reakpoint' in str(bm.getCategory()):
                             bm_mgr.removeBookmark(bm)
-                    currentProgram.endTransaction(tx, True)
+                    _end_tx(currentProgram, tx)
                 except Exception:
-                    currentProgram.endTransaction(tx, False)
+                    _end_tx(currentProgram, tx)
             except Exception: pass
             # Verify nothing left at this address
             remaining = list(svc.getBreakpointsAt(currentProgram, prog_addr))
@@ -1682,10 +1695,10 @@ class REngHelpers:
         tx = currentProgram.startTransaction('define_struct: ' + name)
         try:
             result = dtm.addDataType(st2, DataTypeConflictHandler.REPLACE_HANDLER)
-            currentProgram.endTransaction(tx, True)
+            _end_tx(currentProgram, tx)
             return result
         except Exception as e:
-            currentProgram.endTransaction(tx, False)
+            _end_tx(currentProgram, tx)
             return 'error: ' + str(e)
 
     def scan_vtables(self, prog=None):
@@ -1796,9 +1809,9 @@ class REngHelpers:
                                 if fn.getParentNamespace().isGlobal(): fn.setParentNamespace(ns)
                             except: pass
                     ptr += 8; idx += 1
-            if tx is not None: p.endTransaction(tx, True)
+            if tx is not None: _end_tx(p, tx)
         except Exception as e:
-            if tx is not None: p.endTransaction(tx, False)
+            if tx is not None: _end_tx(p, tx)
             return {'error': str(e)}
         return {'renamed': renamed, 'skipped': skipped, 'errors': errors}
 
@@ -1996,12 +2009,12 @@ class REngHelpers:
         tx = currentProgram.startTransaction('define_class: ' + name)
         try:
             result = dtm.addDataType(st, DataTypeConflictHandler.REPLACE_HANDLER)
-            currentProgram.endTransaction(tx, True)
+            _end_tx(currentProgram, tx)
             chain = (' extends ' + base_class) if base_class else ''
             return 'Created: %s%s (%d bytes, %d own fields, %d inherited via base)' % (
                 name, chain, size, len(merged), (base_dt.getLength() if base_dt else 0))
         except Exception as e:
-            currentProgram.endTransaction(tx, False)
+            _end_tx(currentProgram, tx)
             return 'error: ' + str(e)
 
     def build_hierarchy(self, rt_ptr):
@@ -2102,9 +2115,9 @@ class REngHelpers:
                 except Exception as e:
                     changes.append('ERROR +0x%x %s: %s' % (off, fname, e))
             dtm.addDataType(dt, DataTypeConflictHandler.REPLACE_HANDLER)
-            currentProgram.endTransaction(tx, True)
+            _end_tx(currentProgram, tx)
         except Exception as e:
-            currentProgram.endTransaction(tx, False)
+            _end_tx(currentProgram, tx)
             return 'Transaction failed: ' + str(e)
         return '\n'.join(changes) if changes else 'No changes made'
 
@@ -2127,10 +2140,10 @@ class REngHelpers:
                 if ns is None:
                     ns = st2.createNameSpace(currentProgram.getGlobalNamespace(), namespace, SourceType.USER_DEFINED)
                 fn.setParentNamespace(ns)
-            currentProgram.endTransaction(tx, True)
+            _end_tx(currentProgram, tx)
             return 'Renamed: %s → %s::%s' % (old_name, namespace or 'global', new_name)
         except Exception as e:
-            currentProgram.endTransaction(tx, False)
+            _end_tx(currentProgram, tx)
             return 'Error: ' + str(e)
 
     def apply_struct(self, static_or_rt_addr, struct_name, is_runtime=False):
@@ -2157,10 +2170,10 @@ class REngHelpers:
         try:
             DataUtilities.createData(currentProgram, addr, dt, -1,
                 DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA)
-            currentProgram.endTransaction(tx, True)
+            _end_tx(currentProgram, tx)
             return 'Applied %s at 0x%x — visible in Ghidra Listing view' % (struct_name, addr_int)
         except Exception as e:
-            currentProgram.endTransaction(tx, False)
+            _end_tx(currentProgram, tx)
             return 'Error: ' + str(e)
 
     def as_known(self, rt_addr, offset, struct_name):
