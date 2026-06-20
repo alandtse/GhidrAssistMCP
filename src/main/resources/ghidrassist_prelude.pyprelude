@@ -313,9 +313,8 @@ class DebuggerHelpers:
 
     def attach(self, pid, offer_title=None):
         '''Attach the live debugger to a running process by PID — THE way to START
-        a session from MCP. The debugger tool and the rest of dbg.* only operate on
-        an already-attached session; this creates one (spawns the backend + connects
-        over TraceRMI).
+        a session from MCP. The rest of dbg.* only operates on an already-attached
+        session; this creates one (spawns the backend + connects over TraceRMI).
         pid: OS process id of the running target.
         offer_title: launch offer to use (see dbg.list_attach_offers()); defaults to
           "dbgeng attach" on Windows, else the first attach offer.
@@ -1108,12 +1107,47 @@ class DebuggerHelpers:
         except Exception as e: result['error'] = str(e)
         return result
 
+    def list_sessions(self):
+        '''All open traces and active TraceRMI connections/acceptors.
+        Returns {open_traces: [names], connections: [descriptions], acceptors: [addrs]}.'''
+        result = {'open_traces': [], 'connections': [], 'acceptors': []}
+        try:
+            tm = self.get_trace_manager()
+            if tm is not None:
+                for t in tm.getOpenTraces():
+                    result['open_traces'].append(t.getName())
+            rmi = self._svc('ghidra.app.services.TraceRmiService')
+            if rmi is not None:
+                for c in rmi.getAllConnections():
+                    try: result['connections'].append(c.getDescription())
+                    except Exception: result['connections'].append(str(c))
+                for a in rmi.getAllAcceptors():
+                    try: result['acceptors'].append(str(a.getAddress()))
+                    except Exception: result['acceptors'].append(str(a))
+            return result
+        except Exception as e:
+            result['error'] = str(e)
+            return result
+
+    def server_info(self):
+        '''TraceRMI inbound server state: {server_started, server_address}.
+        Usually not needed — dbg.attach(pid) auto-starts the backend.'''
+        try:
+            rmi = self._svc('ghidra.app.services.TraceRmiService')
+            if rmi is None: return {'error': 'TraceRmiService not loaded'}
+            addr = rmi.getServerAddress()
+            return {'server_started': bool(rmi.isServerStarted()),
+                    'server_address': str(addr) if addr is not None else None}
+        except Exception as e: return {'error': str(e)}
+
     def status(self):
-        '''Summary dict of current debugger state. Check connected=True before other calls.'''
+        '''Summary dict of current debugger state. Check connected=True before other calls.
+        Not connected? Attach to a running process with dbg.attach(<pid>).'''
         try:
             trace = self.get_trace()
             if not trace:
-                return {'connected': False, 'hint': 'Run `debugger status` for more details'}
+                return {'connected': False,
+                        'hint': 'attach to a running process: dbg.attach(<pid>); dbg.list_attach_offers() lists backends'}
             tm = self.get_trace_manager()
             thread = tm.getCurrentThread()
             snap = tm.getCurrentSnap()

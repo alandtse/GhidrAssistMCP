@@ -36,7 +36,6 @@ import ghidrassistmcp.tools.ClassTool;
 import ghidrassistmcp.tools.CommentsTool;
 import ghidrassistmcp.tools.CreateDataVarTool;
 import ghidrassistmcp.tools.CreateFunctionTool;
-import ghidrassistmcp.tools.DebuggerTool;
 import ghidrassistmcp.tools.DisassembleAtTool;
 import ghidrassistmcp.tools.EnumTool;
 import ghidrassistmcp.tools.EquateTool;
@@ -91,7 +90,6 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private boolean agenticMode = true; // Default to true for token efficiency
     private static final java.util.Set<String> CORE_TOOLS = java.util.Set.of(
         "list_binaries", "eval_python", "get_task_status", "list_tasks", "cancel_task",
-        "debugger",  // session management — check/connect debugger before using dbg.* in eval_python
         "scripts",   // script manager — list/read/write/run Ghidra scripts from MCP
         "project"    // project/program management — open projects and binaries without touching the UI
     );
@@ -181,9 +179,6 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new EnumTool());
         registerTool(new EquateTool());
         registerTool(new EvalPythonTool());
-
-        // Register debugger session management tool
-        registerTool(new DebuggerTool());
 
         // Register script management tool
         registerTool(new ScriptsTool());

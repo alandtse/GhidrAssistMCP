@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Streamable HTTP Transport**: Implements the modern, single-endpoint Streamable HTTP transport
-- **49 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **48 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (49 total)
+- **View all available tools** (48 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -162,7 +162,7 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 49 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 48 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -375,11 +375,18 @@ A `ghidra` helper object is pre-injected with common operations:
 | `ghidra.find_addr_in_version(addr, session)` | Find the accepted destination address for a source address across binary versions |
 | `ghidra.accept_vt_match(src_addr, session)` | Accept the first available VT match for a source address |
 
-A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra Debugger. Requires the Debugger plugin to be loaded and an active TraceRMI session (call `dbg.status()` to check):
+A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra Debugger. It owns the whole debugger session lifecycle — attach, inspect, control, detach — from MCP, no GUI needed.
 
 | Helper | Description |
 | ------ | ----------- |
-| `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}` |
+| `dbg.attach(pid, offer_title=None)` | **Start a session**: attach to a running process by PID (defaults to "dbgeng attach" on Windows). Returns `{ok, offer, trace}` |
+| `dbg.list_attach_offers()` | Attach-capable backends available for `dbg.attach` (e.g. "dbgeng attach", gdb/lldb variants) |
+| `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}`. Not connected? `dbg.attach(<pid>)` |
+| `dbg.list_sessions()` | `{open_traces, connections, acceptors}` — open traces and active TraceRMI connections |
+| `dbg.server_info()` | `{server_started, server_address}` — TraceRMI inbound server state (rarely needed; attach auto-starts it) |
+| `dbg.execute(cmd)` | Run a raw dbgeng/WinDbg command and return its output: `k`, `~`, `lm`, `sxd av`, `.lastevent`, `!analyze -v`, `bp …`. The keystone for engine features Ghidra doesn't surface |
+| `dbg.py_execute(python)` | Run raw Python in the ghidradbg backend process (`util`, `util.dbg` in scope); stdout captured |
+| `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
 | `dbg.execute(cmd)` | Run a raw dbgeng/WinDbg command and return its output: `k`, `~`, `lm`, `sxd av`, `.lastevent`, `!analyze -v`, `bp …`. The keystone for engine features Ghidra doesn't surface |
 | `dbg.py_execute(python)` | Run raw Python in the ghidradbg backend process (`util`, `util.dbg` in scope); stdout captured |
 | `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
@@ -473,21 +480,11 @@ A `reng` helper object is pre-injected for reverse-engineering workflows. Works 
 | `reng.load_script(name)` | Read script source for review/editing |
 | `reng.run_script(name)` | Execute existing script in the current Ghidra context |
 
-#### `debugger` - Debugger Session Management
-
-Use before `eval_python` to confirm a session is active or diagnose connection issues.
-
-| Action | Description |
-| ------ | ----------- |
-| `status` | Current state: connected, active trace name, thread, snap |
-| `list_sessions` | All open traces and active TraceRMI connections |
-| `server_info` | TraceRMI TCP server address and whether it is listening |
-
-Typical dynamic analysis workflow:
-1. Connect a backend (GDB/LLDB/WinDbg via TraceRMI, or launch from Debugger menu)
-2. `debugger status` — confirm `connected: true`
-3. `eval_python` with `dbg.status()`, `dbg.get_registers()`, `dbg.set_breakpoint(addr)`
-4. `eval_python` with `dbg.resume()` then `dbg.get_registers()` to inspect state after hitting the breakpoint
+Typical dynamic-analysis workflow (all via `eval_python` + the `dbg` helper):
+1. `dbg.attach(<pid>)` — attach to a running process (`dbg.list_attach_offers()` lists backends); creates the session
+2. `dbg.status()` — confirm `connected: True`
+3. `dbg.get_registers()` / `dbg.read_memory(addr, n)` / `dbg.set_breakpoint(addr)` to inspect and instrument
+4. `dbg.resume()` / `dbg.interrupt()` to control execution; `dbg.detach()` when done
 
 ### Search Tools
 
