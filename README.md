@@ -478,6 +478,22 @@ Typical dynamic-analysis workflow (all via `eval_python` + the `dbg` helper):
 3. `dbg.get_registers()` / `dbg.read_memory(addr, n)` / `dbg.set_breakpoint(addr)` to inspect and instrument
 4. `dbg.resume()` / `dbg.interrupt()` to control execution; `dbg.detach()` when done
 
+To locate an object instance to inspect, use `reng.find_instances(class_or_vtable)`.
+
+#### `eval_python` caveats
+
+- **Transactions:** each `eval_python` call runs inside one Ghidra transaction. The
+  built-in `reng`/`ghidra` write helpers handle this correctly, but in hand-written
+  scripts never end a transaction with `commit=False` — a nested abort rolls back the
+  *entire* eval, silently reverting every other write in the run. Use one always-committed
+  transaction. You also cannot `File → Save` from inside an eval (the active transaction
+  holds the lock); save from the GUI afterward.
+- **Live VR targets:** the SteamVR compositor terminates a process that stops submitting
+  frames, so any debugger break or long frozen-memory scan can kill the game. Capture fast
+  then detach (`dbg.snapshot(addr, len, then='detach')`), or run under the SteamVR **null
+  driver** to suspend indefinitely — note the null driver provides an HMD but no
+  controllers, so controller-state structs won't populate unless controllers are emulated.
+
 ### Search Tools
 
 | Tool | Description |
