@@ -353,15 +353,23 @@ class DebuggerHelpers:
                     if 'attach' in o.getTitle().lower()]
         except Exception as e: return ['error: ' + str(e)]
 
-    def attach(self, pid, offer_title=None):
+    def attach(self, pid, offer_title=None, wait_modules=True, module_timeout=8.0):
         '''Attach the live debugger to a running process by PID — THE way to START
         a session from MCP. The rest of dbg.* only operates on an already-attached
         session; this creates one (spawns the backend + connects over TraceRMI).
         pid: OS process id of the running target.
         offer_title: launch offer to use (see dbg.list_attach_offers()); defaults to
           "dbgeng attach" on Windows, else the first attach offer.
+        wait_modules/module_timeout: poll until reng.image_base() resolves (up to
+          module_timeout s) so to_rt/to_static and reng.* work the instant attach
+          returns. The trace module list populates a few seconds after attach, so
+          without this the ASLR slide lags and static-address reads fail (callers
+          previously had to hand-roll the slide). NOTE: the target is SUSPENDED during
+          attach — on a frame-timed VR target keep module_timeout short (the base
+          usually resolves in <1s) or pass wait_modules=False and use runtime addrs.
         currentProgram should be the binary matching the target (use program_name).
-        Returns {ok, offer, trace, error}. After ok, dbg.status() shows connected.'''
+        Returns {ok, offer, trace, image_base, modules_ready, error}. After ok,
+        dbg.status() shows connected.'''
         try:
             import jpype
             import java.math.BigInteger as BigInteger
@@ -397,9 +405,24 @@ class DebuggerHelpers:
             # when stale connections from other sessions are present.
             try: DebuggerHelpers._conn = result.connection()
             except Exception: DebuggerHelpers._conn = None
+            # The trace module list populates asynchronously a few seconds post-attach;
+            # drop any stale slide from a prior session and wait for the base to resolve
+            # so address translation works immediately on return. image_base() resolves
+            # via the break-in thread name (fast) before the module manager catches up.
+            try: reng._image_base_cache.clear()
+            except Exception: pass
+            ib = None
+            if wait_modules:
+                import time as _t
+                for _ in range(int(max(1, module_timeout / 0.5))):
+                    ib = reng.image_base()
+                    if ib is not None: break
+                    _t.sleep(0.5)
             return {'ok': True, 'offer': offer.getTitle(),
                     'trace': tr.getName() if tr else None,
-                    'execute_ready': self.get_connection() is not None}
+                    'execute_ready': self.get_connection() is not None,
+                    'image_base': ('0x%x' % ib) if ib else None,
+                    'modules_ready': ib is not None}
         except Exception as e: return {'ok': False, 'error': str(e)}
 
     def get_connection(self):
