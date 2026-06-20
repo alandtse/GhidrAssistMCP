@@ -470,14 +470,7 @@ A `reng` helper object is pre-injected for reverse-engineering workflows. Works 
 | `reng.apply_struct(addr, struct_name, is_runtime=False)` | Apply a Ghidra DataType to an address in the Listing view |
 | `reng.rename_function(static_addr, new_name, namespace=None)` | Rename a function (USER_DEFINED source; survives re-analysis); optional class namespace |
 
-**Script management** (prefer the `scripts` MCP tool for interactive use; these helpers exist for use inside `eval_python`):
-
-| Helper | Description |
-| ------ | ----------- |
-| `reng.save_script(name, code, category='MCP', description='')` | Save to `~/ghidra_scripts/`; prepends `@category`/`@description` metadata |
-| `reng.list_scripts(pattern=None)` | List scripts: `[{name, path, category, description}]` |
-| `reng.load_script(name)` | Read script source for review/editing |
-| `reng.run_script(name)` | Execute existing script in the current Ghidra context |
+For managing script files, use the `scripts` MCP tool (list/read/write/run/delete) rather than the analysis prelude.
 
 Typical dynamic-analysis workflow (all via `eval_python` + the `dbg` helper):
 1. `dbg.attach(<pid>)` — attach to a running process (`dbg.list_attach_offers()` lists backends); creates the session
