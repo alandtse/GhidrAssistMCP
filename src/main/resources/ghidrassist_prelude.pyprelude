@@ -299,6 +299,62 @@ class DebuggerHelpers:
         set_image_override(currentProgram.getName(), module_name)
         return _IMAGE_OVERRIDES.get(_mod_basename(currentProgram.getName()))
 
+    def list_attach_offers(self):
+        '''TraceRMI launch offers that attach to a running process (titles).
+        e.g. "dbgeng attach" (Windows), "gdb" / "lldb" attach variants.
+        Use one of these titles with dbg.attach(pid, offer_title=...).'''
+        try:
+            from ghidra.app.services import TraceRmiLauncherService
+            svc = self._tool().getService(TraceRmiLauncherService)
+            if svc is None: return []
+            return [o.getTitle() for o in svc.getOffers(currentProgram)
+                    if 'attach' in o.getTitle().lower()]
+        except Exception as e: return ['error: ' + str(e)]
+
+    def attach(self, pid, offer_title=None):
+        '''Attach the live debugger to a running process by PID — THE way to START
+        a session from MCP. The debugger tool and the rest of dbg.* only operate on
+        an already-attached session; this creates one (spawns the backend + connects
+        over TraceRMI).
+        pid: OS process id of the running target.
+        offer_title: launch offer to use (see dbg.list_attach_offers()); defaults to
+          "dbgeng attach" on Windows, else the first attach offer.
+        currentProgram should be the binary matching the target (use program_name).
+        Returns {ok, offer, trace, error}. After ok, dbg.status() shows connected.'''
+        try:
+            import jpype
+            import java.math.BigInteger as BigInteger
+            from ghidra.app.services import TraceRmiLauncherService
+            from ghidra.debug.api import ValStr
+            import ghidra.util.task.TaskMonitor as TaskMonitor
+            svc = self._tool().getService(TraceRmiLauncherService)
+            if svc is None: return {'ok': False, 'error': 'TraceRmiLauncherService not available'}
+            offers = list(svc.getOffers(currentProgram))
+            attach_offers = [o for o in offers if 'attach' in o.getTitle().lower()]
+            if offer_title is not None:
+                offer = next((o for o in offers if o.getTitle() == offer_title), None)
+            else:
+                offer = next((o for o in attach_offers if o.getTitle() == 'dbgeng attach'),
+                             attach_offers[0] if attach_offers else None)
+            if offer is None:
+                return {'ok': False, 'error': 'no matching attach offer',
+                        'available': [o.getTitle() for o in attach_offers]}
+            _pid = int(pid)
+            @jpype.JImplements('ghidra.debug.api.tracermi.TraceRmiLaunchOffer$LaunchConfigurator')
+            class _Cfg:
+                @jpype.JOverride
+                def configureLauncher(self, off, arguments, relPrompt):
+                    arguments.put('env:OPT_TARGET_PID', ValStr.from_(BigInteger.valueOf(_pid)))
+                    return arguments
+            result = offer.launchProgram(TaskMonitor.DUMMY, _Cfg())
+            exc = result.exception()
+            if exc:
+                return {'ok': False, 'offer': offer.getTitle(), 'error': str(exc)}
+            tr = result.trace()
+            return {'ok': True, 'offer': offer.getTitle(),
+                    'trace': tr.getName() if tr else None}
+        except Exception as e: return {'ok': False, 'error': str(e)}
+
     def get_connection(self):
         '''Active TraceRmiConnection for the current trace, or None.
         The connection exposes the backend's registered RemoteMethods

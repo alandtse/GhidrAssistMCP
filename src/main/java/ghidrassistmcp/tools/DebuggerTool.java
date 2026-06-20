@@ -41,12 +41,17 @@ public class DebuggerTool implements McpTool {
               list_sessions — All open Trace objects and active TraceRMI connections with their descriptions
               server_info   — TraceRMI TCP server address and whether it is listening for inbound connections
 
+            To ATTACH to a running process from MCP (no Ghidra GUI needed), run eval_python: \
+            `dbg.attach(<pid>)` — this starts the session. `dbg.list_attach_offers()` shows the \
+            available backends (e.g. "dbgeng attach" on Windows). Then dbg.* operates on it.
+
             For dynamic analysis (registers, memory, breakpoints, stepping) use eval_python with the \
             injected `dbg` helper. The `dbg` object is only functional when `debugger status` shows \
             connected=true. Typical workflow:
-              1. `debugger status` — confirm a session is active
-              2. `eval_python` with `dbg.status()`, `dbg.get_registers()`, `dbg.read_memory(addr, n)`, etc.
-              3. `eval_python` with `dbg.resume()` / `dbg.step_into()` / `dbg.step_over()` to control execution
+              1. `eval_python` with `dbg.attach(<pid>)` — attach to the running target (creates the session)
+              2. `debugger status` — confirm connected=true
+              3. `eval_python` with `dbg.status()`, `dbg.get_registers()`, `dbg.read_memory(addr, n)`, etc.
+              4. `eval_python` with `dbg.resume()` / `dbg.step_into()` to control execution; `dbg.detach()` when done
             """;
     }
 
@@ -122,7 +127,7 @@ public class DebuggerTool implements McpTool {
             if (trace == null) {
                 sb.append("connected: false\n");
                 sb.append("reason: Debugger plugin is loaded but no active trace/session\n");
-                sb.append("\nStart a debug session: Debugger > Debug Active Process or connect via TraceRMI.");
+                sb.append("\nTo attach from MCP: eval_python -> dbg.attach(<pid>)  (dbg.list_attach_offers() lists backends).");
                 return McpSchema.CallToolResult.builder().addTextContent(sb.toString()).build();
             }
 
@@ -221,7 +226,7 @@ public class DebuggerTool implements McpTool {
                 sb.append("\nDebuggers can connect to this address using TraceRMI.\n");
                 sb.append("Example (gdb): ghidra trace connect \"").append(addr).append("\"");
             } else {
-                sb.append("\nServer not started. Use Debugger > Connect to start it or launch a backend.");
+                sb.append("\nServer not started. To attach a running process from MCP: eval_python -> dbg.attach(<pid>) (auto-starts the backend).");
             }
 
         } catch (Exception e) {
