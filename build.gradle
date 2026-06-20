@@ -57,6 +57,22 @@ dependencies {
 	implementation 'com.fasterxml.jackson.core:jackson-annotations:2.18.3'
 }
 
+// Keep lib/ free of stale dependency jars.
+// Ghidra's copyDependencies (support/buildExtension.gradle) copies the runtimeClasspath
+// into lib/ but never removes jars already there, and that same script adds
+// `api fileTree(dir:'lib')` back onto the classpath. Together they form a feedback loop:
+// once a jar lands in lib/ it is treated as a dependency forever, so old versions pile up
+// and keep getting bundled even after the declarations here change. Wiping lib/ before
+// copyDependencies resolves the classpath makes lib/ always mirror the declared deps.
+tasks.register('cleanLibDependencies', Delete) {
+	group = "Ghidra"
+	description = "Remove copied dependency jars from lib/ so stale versions don't accumulate"
+	delete fileTree(dir: 'lib', include: '*.jar')
+}
+tasks.matching { it.name == 'copyDependencies' }.configureEach {
+	dependsOn 'cleanLibDependencies'
+}
+
 // Exclude additional files from the built extension
 // Ex: buildExtension.exclude '.idea/**'
 
