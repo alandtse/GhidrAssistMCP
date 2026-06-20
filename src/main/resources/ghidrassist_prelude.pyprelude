@@ -231,6 +231,11 @@ class DebuggerHelpers:
     Snaps are integer time-points; use dbg.get_snap() for the current one.
     Addresses: pass hex-string ('0x1234') or int; internal conversion via trace.getBaseAddressFactory().
     '''
+    # Connection captured by attach(); preferred by get_connection() so the
+    # execute/py_execute passthrough works even when stale connections from other
+    # sessions/worktraces are present (the heuristic match would otherwise fail).
+    _conn = None
+
     def _tool(self):
         '''Get the active PluginTool from the current state.'''
         return state.getTool()
@@ -284,6 +289,30 @@ class DebuggerHelpers:
         '''Current snapshot index (long). Returns -1 if no session.'''
         tm = self.get_trace_manager()
         return tm.getCurrentSnap() if tm else -1
+    def get_control_mode(self):
+        '''Current control mode name (e.g. RO_TARGET, RW_TARGET), or None.
+        Fresh attaches are RO_TARGET — breakpoints stay INEFFECTIVE and writes
+        are blocked until you switch to RW_TARGET.'''
+        try:
+            ctrl = self._svc('ghidra.app.services.DebuggerControlService')
+            trace = self.get_trace()
+            return str(ctrl.getCurrentMode(trace)) if (ctrl and trace) else None
+        except Exception: return None
+    def set_control_mode(self, mode='RW_TARGET'):
+        '''Set the debugger control mode. Pass 'RW_TARGET' to arm breakpoints and
+        allow live writes (registers/memory), or 'RO_TARGET' for read-only.
+        Accepts any ControlMode name (RO_TARGET/RW_TARGET/RO_TRACE/RW_TRACE/RW_EMULATOR).
+        Returns the new mode name or an error string.'''
+        try:
+            from ghidra.debug.api.control import ControlMode
+            ctrl = self._svc('ghidra.app.services.DebuggerControlService')
+            trace = self.get_trace()
+            if ctrl is None or trace is None: return 'no active trace/control service'
+            cm = next((m for m in ControlMode.values() if m.name() == mode), None)
+            if cm is None: return 'unknown mode: %s (try RW_TARGET)' % mode
+            ctrl.setCurrentMode(trace, cm)
+            return self.get_control_mode()
+        except Exception as e: return 'error: ' + str(e)
     def get_threads(self):
         '''List all TraceThread objects in the active trace.'''
         trace = self.get_trace()
@@ -350,25 +379,38 @@ class DebuggerHelpers:
             if exc:
                 return {'ok': False, 'offer': offer.getTitle(), 'error': str(exc)}
             tr = result.trace()
+            # Capture the connection from the launch result so execute/py_execute
+            # bind to THIS session — get_connection's heuristic can't pick it out
+            # when stale connections from other sessions are present.
+            try: DebuggerHelpers._conn = result.connection()
+            except Exception: DebuggerHelpers._conn = None
             return {'ok': True, 'offer': offer.getTitle(),
-                    'trace': tr.getName() if tr else None}
+                    'trace': tr.getName() if tr else None,
+                    'execute_ready': self.get_connection() is not None}
         except Exception as e: return {'ok': False, 'error': str(e)}
 
     def get_connection(self):
-        '''Active TraceRmiConnection for the current trace, or None.
-        The connection exposes the backend's registered RemoteMethods
-        (getMethods().all()) — the gateway for py_execute / execute.'''
+        '''Active TraceRmiConnection, or None. Prefers the connection captured by
+        attach() (so execute/py_execute bind to this session even when stale
+        connections from other sessions exist), then falls back to matching the
+        current trace, then to the sole connection.'''
         try:
             from ghidra.app.services import TraceRmiService
-            trace = self.get_trace()
             svc = self._tool().getService(TraceRmiService)
-            if svc is None or trace is None: return None
-            for c in svc.getAllConnections():
-                try:
-                    if c.getTrace() == trace: return c
-                except Exception: pass
-            # Fall back to the sole connection if trace match is unavailable
+            if svc is None: return None
             conns = list(svc.getAllConnections())
+            # 1. The connection attach() captured, if still open.
+            if DebuggerHelpers._conn is not None and DebuggerHelpers._conn in conns:
+                return DebuggerHelpers._conn
+            DebuggerHelpers._conn = None
+            # 2. Match the current trace.
+            trace = self.get_trace()
+            if trace is not None:
+                for c in conns:
+                    try:
+                        if c.getTrace() == trace: return c
+                    except Exception: pass
+            # 3. Sole connection.
             return conns[0] if len(conns) == 1 else None
         except Exception: return None
 
@@ -558,6 +600,74 @@ class DebuggerHelpers:
             target.readMemory(aset, monitor)
             return 'ok'
         except Exception as e: return 'error: ' + str(e)
+    def search_memory(self, value, start, length, kind='q'):
+        '''Search a live memory range for a value via dbgeng `s`. Returns a list of
+        runtime addresses (ints) where it occurs. Requires a live session.
+        value: int (qword/dword/word/byte per kind) or a hex-byte string for kind='b'.
+        start: runtime address (int or hex). length: bytes to scan from start.
+        kind: 'q'(8) / 'd'(4) / 'w'(2) / 'b'(bytes).
+        Bound the range — scanning a multi-GB heap is slow and, on a frame-timed
+        target (VR), a long freeze can kill the process. Typical use: find a vtable
+        pointer in the heap to locate object instances.'''
+        try:
+            s = start if isinstance(start, int) else int(str(start).replace('0x','').replace('0X',''), 16)
+            count = max(1, length // {'q':8,'d':4,'w':2,'b':1}.get(kind, 1))
+            if kind == 'b':
+                pat = value if isinstance(value, str) else ('%x' % value)
+                cmd = 's -b 0x%x L?0x%x %s' % (s, length, ' '.join(pat[i:i+2] for i in range(0, len(pat), 2)))
+            else:
+                cmd = 's -%s 0x%x L?0x%x 0x%x' % (kind, s, count, int(value))
+            out = self.execute(cmd)
+            if not isinstance(out, str) or out.startswith('error'):
+                return {'error': out, 'hint': 'needs a live session; if attached via dbg.attach this now works'}
+            import re as _re
+            hits = []
+            for line in out.splitlines():
+                m = _re.match(r'\s*([0-9a-fA-F`]{8,})\b', line)
+                if m: hits.append(int(m.group(1).replace('`', ''), 16))
+            return hits
+        except Exception as e: return {'error': str(e)}
+    def list_regions(self):
+        '''Committed memory regions of the live target via dbgeng `!address`.
+        Returns [{base, end, size, usage}] (best-effort parse) for bounding a scan;
+        complements list_modules() (which only covers loaded modules, not heap).'''
+        try:
+            out = self.execute('!address')
+            if not isinstance(out, str) or out.startswith('error'):
+                return {'error': out}
+            import re as _re
+            regions = []
+            for line in out.splitlines():
+                m = _re.search(r'([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+([0-9a-fA-F`]+)\s+(.*)', line)
+                if not m: continue
+                try:
+                    base = int(m.group(1).replace('`',''), 16)
+                    end  = int(m.group(2).replace('`',''), 16)
+                    size = int(m.group(3).replace('`',''), 16)
+                except Exception: continue
+                if base >= end: continue
+                regions.append({'base': '0x%x' % base, 'end': '0x%x' % end,
+                                'size': '0x%x' % size, 'usage': m.group(4).strip()[:48]})
+            return regions if regions else {'raw': out[:2000]}
+        except Exception as e: return {'error': str(e)}
+    def snapshot(self, addr, length, then=None):
+        '''Capture a memory region into the trace so it survives the target's death,
+        then optionally continue or detach. The capture-fast-then-detach workflow for
+        frame-timed targets (VR) that get killed by the compositor when suspended.
+        addr: static or live address. then: None | 'resume' | 'detach'.
+        Returns {ok, address, length, hex, then}. The bytes stay readable offline
+        from the trace afterward (read_memory/read_bytes with refresh=False).'''
+        try:
+            r = self.refresh_memory(addr, length)
+            if isinstance(r, str) and r.startswith('error'):
+                return {'ok': False, 'error': r}
+            hexs = self.read_memory(addr, length)
+            after = None
+            if then == 'resume': after = self.resume()
+            elif then == 'detach': after = self.detach()
+            return {'ok': True, 'address': addr if isinstance(addr, str) else '0x%x' % addr,
+                    'length': length, 'hex': hexs, 'then': after}
+        except Exception as e: return {'ok': False, 'error': str(e)}
     def read_bytes(self, addr, length, snap=None, refresh=True):
         '''Read `length` bytes and return a Python bytes object (not a hex string).
         refresh=True fetches from the live target first (avoids cold-page zeros).
@@ -684,6 +794,7 @@ class DebuggerHelpers:
                 c.close()
             steps.append('connection closed')
         except Exception as e: steps.append('close-conn-err: %s' % e)
+        DebuggerHelpers._conn = None
         return ' → '.join(steps)
     def list_breakpoints(self):
         '''List all logical breakpoints as list of {address, state, kinds, length} dicts.
@@ -796,17 +907,18 @@ class DebuggerHelpers:
         out = self.execute('bc %s' % ' '.join(ids))
         return {'ok': True, 'address': '0x%x' % a, 'removed': ids, 'output': out}
 
-    def set_breakpoint(self, addr, length=1, name='', raw=False):
+    def set_breakpoint(self, addr, length=1, name='', raw=False, arm=True):
         '''Place a software-execute breakpoint.
         addr: int (e.g. 0x1406c2140) or hex string.
         raw=False (default): logical breakpoint at a STATIC Ghidra address,
-          auto-mapped to the live target. Returns a dict with the actual state:
-            {ok, address: '0x...', state, message}
-          state: ENABLED (armed), INEFFECTIVE_ENABLED (placed, not yet armed).
+          auto-mapped to the live target. Returns {ok, address, state, message}.
+          state: ENABLED (armed) or INEFFECTIVE_ENABLED (placed, not yet armed).
+        arm=True (default): if the bp lands INEFFECTIVE because the session is
+          RO_TARGET, switch to RW_TARGET and re-check (setting a bp implies intent
+          to break). Set arm=False to leave the control mode untouched.
         raw=True: route to set_raw_breakpoint() — a dbgeng `bp` on the given
           RUNTIME address, bypassing static mapping. Use for unmapped/system
-          modules (d3d11.dll, ntdll) that aren't static programs in the project.
-          Returns {ok, address, raw: True, output}.'''
+          modules (d3d11.dll, ntdll) that aren't static programs in the project.'''
         if raw:
             r = self.set_raw_breakpoint(addr, 'e')
             r['raw'] = True
@@ -823,15 +935,25 @@ class DebuggerHelpers:
             kinds = _JSet.of(TraceBreakpointKind.SW_EXECUTE)
             future = svc.placeBreakpointAt(currentProgram, prog_addr, length, kinds, name)
             future.get()
-            # Verify placement by querying back
             placed = list(svc.getBreakpointsAt(currentProgram, prog_addr))
             if not placed:
                 return {'ok': False, 'address': hex_str,
                         'message': 'placeBreakpointAt returned but no logical breakpoint exists at this address — likely a stale mapping or unloaded module'}
             bp = placed[0]
             bp_state = bp.computeState().name()
-            return {'ok': True, 'address': hex_str, 'state': bp_state,
-                    'message': 'INEFFECTIVE_ENABLED means placed but not yet armed (check control_mode and ensure_static_mapping)' if bp_state == 'INEFFECTIVE_ENABLED' else ''}
+            armed_note = ''
+            # A fresh attach is RO_TARGET, where logical bps stay INEFFECTIVE and
+            # never fire. Arming (RW_TARGET) is what the caller almost always wants.
+            if bp_state == 'INEFFECTIVE_ENABLED' and arm and self.get_control_mode() == 'RO_TARGET':
+                self.set_control_mode('RW_TARGET')
+                bp_state = bp.computeState().name()
+                armed_note = ' (switched control mode RO_TARGET -> RW_TARGET to arm)'
+            msg = ''
+            if bp_state == 'INEFFECTIVE_ENABLED':
+                msg = ('placed but not armed; control_mode=%s. For static-address bps the live '
+                       'module must be mapped (use_image) and mode must be RW_TARGET '
+                       '(dbg.set_control_mode("RW_TARGET"))' % self.get_control_mode())
+            return {'ok': True, 'address': hex_str, 'state': bp_state, 'message': msg + armed_note}
         except Exception as e:
             return {'ok': False, 'message': 'error: ' + str(e)}
     def delete_breakpoints(self, addr):
@@ -868,6 +990,55 @@ class DebuggerHelpers:
             remaining = list(svc.getBreakpointsAt(currentProgram, prog_addr))
             msg = '' if not remaining else 'warning: %d logical breakpoint(s) still listed at this address' % len(remaining)
             return {'ok': True, 'address': hex_str, 'deleted': len(futures), 'message': msg}
+        except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
+    def clear_all_breakpoints(self):
+        '''Delete EVERY logical breakpoint in the session, regardless of address kind.
+        Handles the stale bps that get re-applied from other Ghidra sessions/worktrees
+        (named, raw/runtime-address, and INEFFECTIVE ones) which delete_breakpoints
+        (static-address only) and remove_raw_breakpoint (dbgeng `bl` only) can't reach.
+        Returns {ok, deleted, remaining}.'''
+        try:
+            svc = self.get_bp_service()
+            if not svc: return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
+            bps = list(svc.getAllBreakpoints())
+            deleted = 0
+            for bp in bps:
+                try: bp.delete().get(); deleted += 1
+                except Exception: pass
+            remaining = len(list(svc.getAllBreakpoints()))
+            return {'ok': True, 'deleted': deleted, 'remaining': remaining}
+        except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
+    def _logical_bps_at(self, addr):
+        '''All logical breakpoints whose address offset matches addr (static or runtime).'''
+        svc = self.get_bp_service()
+        if not svc: return []
+        try: target = int(str(addr).replace('0x','').replace('0X',''), 16) if not isinstance(addr, int) else addr
+        except Exception: return []
+        out = []
+        for bp in svc.getAllBreakpoints():
+            try:
+                if bp.getAddress().getOffset() == target: out.append(bp)
+            except Exception: pass
+        return out
+    def disable_breakpoint(self, addr):
+        '''Disable (without deleting) logical breakpoints at addr (static OR runtime).'''
+        try:
+            bps = self._logical_bps_at(addr)
+            if not bps: return {'ok': False, 'message': 'no logical breakpoint at that address'}
+            for bp in bps:
+                try: bp.disable().get()
+                except Exception: pass
+            return {'ok': True, 'disabled': len(bps)}
+        except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
+    def enable_breakpoint(self, addr):
+        '''Enable logical breakpoints at addr (static OR runtime).'''
+        try:
+            bps = self._logical_bps_at(addr)
+            if not bps: return {'ok': False, 'message': 'no logical breakpoint at that address'}
+            for bp in bps:
+                try: bp.enable().get()
+                except Exception: pass
+            return {'ok': True, 'enabled': len(bps)}
         except Exception as e: return {'ok': False, 'message': 'error: ' + str(e)}
     def _parse_k(self, text):
         '''Parse dbgeng `k` output into [{level, stack_ptr, ret_addr, location, module, symbol}].'''

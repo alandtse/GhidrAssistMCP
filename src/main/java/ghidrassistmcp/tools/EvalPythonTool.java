@@ -89,7 +89,10 @@ public class EvalPythonTool implements McpTool {
             "find_struct(name) returns the raw DataType (large — stringifying dumps every field). " +
             "VT helpers: get_vt_sessions, get_vt_matches, find_addr_in_version, accept_vt_match.\n" +
             "  dbg.*    — live debugger. START a session with dbg.attach(<pid>) (dbg.list_attach_offers() lists " +
-            "backends); then memory, registers, breakpoints, stepping, dbg.list_modules(), dbg.detach() when done.\n" +
+            "backends); then memory/registers/breakpoints/stepping, dbg.execute('<windbg cmd>') passthrough, " +
+            "dbg.search_memory(value,start,len)/list_regions to find instances, dbg.set_control_mode('RW_TARGET') " +
+            "to arm bps, dbg.clear_all_breakpoints(), dbg.snapshot(addr,len,then='detach') for VR fast-capture, " +
+            "dbg.detach() when done.\n" +
             "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static), RTTI (rtti/class_hierarchy/vtable_methods), " +
             "ReClass-style struct exploration (explore/follow/tree/diff/as_known/as_array), authoring " +
             "(define_class/define_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
