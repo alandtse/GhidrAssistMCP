@@ -73,6 +73,7 @@ import ghidrassistmcp.tools.ProgramInfoTool;
 import ghidrassistmcp.tools.RenameSymbolBatchTool;
 import ghidrassistmcp.tools.RenameSymbolTool;
 import ghidrassistmcp.tools.PatchBytesTool;
+import ghidrassistmcp.tools.SaveProgramTool;
 import ghidrassistmcp.tools.ScriptsTool;
 import ghidrassistmcp.tools.SearchBytesTool;
 import ghidrassistmcp.tools.SearchFunctionsByNameTool;
@@ -166,6 +167,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         // Register project-level tools
         registerTool(new OpenProgramTool());          // open_program: open/list project files in CodeBrowser
         registerTool(new CloseProgramTool());         // close_program: close open programs in CodeBrowser
+        registerTool(new SaveProgramTool());          // save_program: persist pending changes to the project
         registerTool(new ProjectFilesTool());         // project_files: list/delete project files and folders
         registerTool(new AssembleCodeTool());         // assemble_code: assemble instructions and optionally patch bytes
         registerTool(new PatchBytesTool());           // patch_bytes: write patched bytes into program memory

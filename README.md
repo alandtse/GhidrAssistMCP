@@ -11,7 +11,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
-- **53 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **54 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (53 total)
+- **View all available tools** (54 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -162,7 +162,7 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 53 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 54 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
@@ -172,6 +172,7 @@ GhidrAssistMCP provides 53 tools organized into categories. Several tools use an
 | `list_binaries` | List all open programs across all CodeBrowser windows, including Project Path values for unambiguous `program_name` targeting |
 | `open_program` | List/open project programs in CodeBrowser, with optional analysis prompt suppression and analysis-after-open task submission |
 | `close_program` | Close an open CodeBrowser program; changed programs require `save=true` or `ignore_changes=true` |
+| `save_program` | Save a program's pending changes to the Ghidra project (use after `eval_python`, which cannot save from inside its own transaction) |
 | `import_file` | Import a host file into the current Ghidra project and optionally open it *(disabled by default)* |
 | `project_files` | List or delete files/folders in the active Ghidra project; deletion requires `confirm=true` |
 | `scripts` | List/read/create/delete/run Ghidra scripts *(disabled by default)* |
@@ -501,7 +502,7 @@ To locate an object instance to inspect, use `reng.find_instances(class_or_vtabl
   scripts never end a transaction with `commit=False` — a nested abort rolls back the
   *entire* eval, silently reverting every other write in the run. Use one always-committed
   transaction. You also cannot `File → Save` from inside an eval (the active transaction
-  holds the lock); save from the GUI afterward.
+  holds the lock); call the `save_program` tool afterward instead (or save from the GUI).
 - **Live VR targets:** the SteamVR compositor terminates a process that stops submitting
   frames, so any debugger break or long frozen-memory scan can kill the game. Capture fast
   then detach (`dbg.snapshot(addr, len, then='detach')`), or run under the SteamVR **null
