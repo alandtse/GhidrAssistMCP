@@ -10,13 +10,13 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Python 3 Scripting Support**: Provides an `eval_python` endpoint giving AI full scriptable access to the Ghidra API (when launched with PyGhidra)
-- **Streamable HTTP Transport**: Implements the modern, single-endpoint Streamable HTTP transport
-- **47 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
+- **53 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
 - **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
 - **Async Task Support**: Long-running operations execute asynchronously with task management
-- **Multi-Program Support**: Work with multiple open programs simultaneously using `program_name` parameter
+- **Multi-Program Support**: Work with multiple open programs simultaneously using `program_name`; use `list_binaries` Project Path values to disambiguate duplicate filenames
 - **Multi-Window Support**: Single MCP server shared across all CodeBrowser windows with intelligent focus tracking
 - **Active Context Awareness**: Automatic detection of which binary window is in focus, with context hints in all tool responses
 - **Configurable UI**: Easy-to-use interface for managing tools and monitoring activity
@@ -36,7 +36,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 ### Prerequisites
 
-- **Ghidra 11.4+** (tested with Ghidra 12.0 Public)
+- **Ghidra 11.4+** (tested with Ghidra 12.1 Public)
 - **An MCP Client (Like GhidrAssist)**
 
 ### Binary Release (Recommended)
@@ -99,7 +99,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (47 total)
+- **View all available tools** (53 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
@@ -113,15 +113,15 @@ First, build and install the extension so Ghidra can load the compiled classes a
 ```bash
 cd /path/to/GhidrAssistMCP
 
-export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.0_PUBLIC
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1_PUBLIC
 gradle installExtension
 ```
 
 Set paths for your Ghidra install and extracted user extension. On Linux, Ghidra user extensions usually live under `~/.config/ghidra/<ghidra_profile>/Extensions`:
 
 ```bash
-export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.0_PUBLIC
-export GHIDRA_USER_EXTENSIONS_DIR="$HOME/.config/ghidra/ghidra_12.0_PUBLIC/Extensions"
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1_PUBLIC
+export GHIDRA_USER_EXTENSIONS_DIR="$HOME/.config/ghidra/ghidra_12.1_PUBLIC/Extensions"
 export GHIDRASSISTMCP_EXT="$GHIDRA_USER_EXTENSIONS_DIR/GhidrAssistMCP"
 ```
 
@@ -162,19 +162,33 @@ The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loade
 
 ## Available Tools
 
-GhidrAssistMCP provides 47 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 53 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Binary & Program Management
 
 | Tool | Description |
 | ---- | ----------- |
 | `get_binary_info` | Get basic program information (name, architecture, compiler, etc.) |
-| `list_binaries` | List all open programs across all CodeBrowser windows |
+| `list_binaries` | List all open programs across all CodeBrowser windows, including Project Path values for unambiguous `program_name` targeting |
+| `open_program` | List/open project programs in CodeBrowser, with optional analysis prompt suppression and analysis-after-open task submission |
+| `close_program` | Close an open CodeBrowser program; changed programs require `save=true` or `ignore_changes=true` |
+| `import_file` | Import a host file into the current Ghidra project and optionally open it *(disabled by default)* |
+| `project_files` | List or delete files/folders in the active Ghidra project; deletion requires `confirm=true` |
+| `scripts` | List/read/create/delete/run Ghidra scripts *(disabled by default)* |
 | `assemble_code` | Assemble instruction text at an address and optionally patch it into program memory |
 | `patch_bytes` | Patch raw bytes in program memory at a given address |
 | `export_program` | Export the current program to disk (`binary` or `original_file`) *(disabled by default)* |
 
-> **Security-sensitive tools:** `import_file` and `export_program` are disabled by default because they interact with the host filesystem. Enable them explicitly in the plugin configuration UI when needed.
+> **Security-sensitive tools:** `import_file`, `scripts`, and `export_program` are disabled by default because they interact with the host filesystem or execute script code. Enable them explicitly in the plugin configuration UI when needed.
+> `project_files` deletes entries from the active Ghidra project database, not the original imported host files, and requires `confirm=true`.
+
+### Auto Analysis
+
+| Tool | Description |
+| ---- | ----------- |
+| `analysis_options` | List/set/reset Auto Analysis options and save/apply/list/delete option presets for the current program |
+| `analyze_program` | Run Auto Analysis on the current program or all open programs; supports full re-analysis, pending-changes analysis, address ranges, and option overrides |
+| `analysis_control` | Query Auto Analysis status or request cancellation of queued analysis tasks |
 
 #### `open_program` - Open / List Project Programs
 
@@ -208,8 +222,8 @@ Manage and run scripts in the user's Ghidra scripts directory (`~/ghidra_scripts
 | `get_current_function` | Get function at current cursor position |
 | `get_function_stack_layout` | Get stack frame layout with variable offsets |
 | `get_basic_blocks` | Get basic block information for a function |
-| `create_function` | Create/define a function at an address |
-| `disassemble_at` | Disassemble code at an address |
+| `create_function` | Create/define a function at an address, optionally clearing existing data/code first |
+| `disassemble_at` | Disassemble code at an address, optionally clearing existing data/code in the range first |
 
 ### Binary Information
 
@@ -710,6 +724,23 @@ Equivalent form:
 }
 ```
 
+For overlays or mixed code/data regions where Ghidra defined code as data, clear the existing code unit or an explicit range first:
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "create_function",
+    "arguments": {
+      "address": "0x80012340",
+      "name": "ovl_init",
+      "clear_existing": true,
+      "clear_length": 256
+    }
+  }
+}
+```
+
 ### Rename Function (Action-Based)
 
 ```json
@@ -739,7 +770,7 @@ When working with multiple open programs, first list them:
 }
 ```
 
-Then specify which program to target using `program_name`:
+Then specify which program to target using `program_name`. When multiple programs share the same filename, use the `Project Path` shown by `list_binaries`:
 
 ```json
 {
@@ -747,7 +778,7 @@ Then specify which program to target using `program_name`:
   "params": {
     "name": "get_functions",
     "arguments": {
-      "program_name": "target_binary.exe",
+      "program_name": "/project/folder/target_binary.exe",
       "limit": 10
     }
   }
@@ -831,7 +862,7 @@ GhidrAssistMCP/
 │   ├── TraceNetworkDataPrompt.java
 │   ├── CompareFunctionsPrompt.java
 │   └── ReverseEngineerStructPrompt.java
-└── tools/                    # MCP Tools (35 total)
+└── tools/                    # MCP Tools (49 total)
     ├── Consolidated action-based tools
     ├── Analysis tools
     ├── Modification tools
@@ -851,6 +882,10 @@ GhidrAssistMCP/
 - `types`: `action: list|get|set|create_struct|create_enum|create_typedef|delete`
 - `bookmarks`: `action: list|set|remove`
 - `xrefs`: `address|function` with `include_calls` parameter
+- `analysis_options`: `action: list|set|reset|save_preset|apply_preset|list_presets|delete_preset`
+- `analysis_control`: `action: status|cancel`
+- `project_files`: `action: list|delete`
+- `scripts`: `action: list|get|create|delete|run`
 
 **Tool Interface Methods**:
 
