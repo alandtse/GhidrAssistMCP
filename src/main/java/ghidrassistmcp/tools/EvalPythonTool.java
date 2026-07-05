@@ -89,10 +89,15 @@ public class EvalPythonTool implements McpTool {
             "find_struct(name) returns the raw DataType (large — stringifying dumps every field). " +
             "VT helpers: get_vt_sessions, get_vt_matches, find_addr_in_version, accept_vt_match.\n" +
             "  dbg.*    — live debugger. START a session with dbg.attach(<pid>) (dbg.list_attach_offers() lists " +
-            "backends); then memory/registers/breakpoints/stepping, dbg.execute('<windbg cmd>') passthrough, " +
-            "dbg.search_memory(value,start,len)/list_regions to find instances, dbg.set_control_mode('RW_TARGET') " +
-            "to arm bps, dbg.clear_all_breakpoints(), dbg.snapshot(addr,len,then='detach') for VR fast-capture, " +
-            "dbg.detach() when done.\n" +
+            "backends). Prefer dbg.attach(pid, mode='observe') for read-only live memory/struct work (reng.explore/" +
+            "find_instances/label/diff*) — dbgeng never suspends the target, so it's the safe default against a " +
+            "real/HMD session; reserve mode='default' (invasive, suspends) for when you actually need breakpoints, " +
+            "stepping, or register writes. Then memory/registers/breakpoints/stepping, dbg.execute('<windbg cmd>') " +
+            "passthrough, dbg.search_memory(value,start,len)/list_regions to find instances, " +
+            "dbg.set_control_mode('RW_TARGET') to arm bps, dbg.clear_all_breakpoints(), " +
+            "dbg.snapshot(addr,len,then='detach') for VR fast-capture, dbg.detach() when done (captures " +
+            "last_event/registers/stack before tearing the trace down, so calling it reflexively after an " +
+            "unexpected break doesn't lose that forensic data).\n" +
             "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static — image_base is the canonical " +
             "live slide, prefer it over list_modules which lags after attach), RTTI " +
             "(rtti/class_hierarchy/vtable_methods), live instance location " +

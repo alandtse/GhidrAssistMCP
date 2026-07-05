@@ -393,7 +393,7 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 
 | Helper | Description |
 | ------ | ----------- |
-| `dbg.attach(pid, offer_title=None)` | **Start a session**: attach to a running process by PID (defaults to "dbgeng attach" on Windows). Returns `{ok, offer, trace}` |
+| `dbg.attach(pid, offer_title=None, mode='default')` | **Start a session**: attach to a running process by PID (defaults to "dbgeng attach" on Windows). `mode='observe'` uses dbgeng's `DEBUG_ATTACH_NONINVASIVE_NO_SUSPEND` — the target is never stopped, so it's the safe default for read-only live memory/struct work (`reng.explore`/`find_instances`/`label`/`diff*`); `mode='default'` is invasive (suspends) and required for breakpoints/stepping/register writes. Returns `{ok, offer, trace, image_base, modules_ready, armed_breakpoints, mode}` |
 | `dbg.list_attach_offers()` | Attach-capable backends available for `dbg.attach` (e.g. "dbgeng attach", gdb/lldb variants) |
 | `dbg.status()` | Summary dict: `{connected, trace, snap, thread, has_live_target, control_mode}`. Not connected? `dbg.attach(<pid>)` |
 | `dbg.list_sessions()` | `{open_traces, connections, acceptors}` — open traces and active TraceRMI connections |
@@ -405,7 +405,7 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 | `dbg.py_execute(python)` | Run raw Python in the ghidradbg backend process (`util`, `util.dbg` in scope); stdout captured |
 | `dbg.health()` | Long-session resource report: `{snap_count, max_snap, thread_count, module_count, breakpoint_count, mcp_task_count}` |
 | `dbg.cleanup(keep_snaps=None)` | Delete old trace snapshots via `TraceSnapshot.delete()` to compact the `.DBTrace` file (keeps current snap by default) |
-| `dbg.detach()` | Clean target disconnect (interrupt → DETACH → close trace → close TraceRMI connection); keeps the debuggee process alive |
+| `dbg.detach()` | Clean target disconnect (interrupt → DETACH → close trace → close TraceRMI connection); keeps the debuggee process alive. Captures `last_event`/`event_registers`/`get_stack` *before* tearing the trace down, so calling it reflexively after an unexpected break doesn't lose that data. Returns `{steps, forensics: {last_event, event_registers, stack}}` |
 | `dbg.get_threads()` | List all `TraceThread` objects in the active trace |
 | `dbg.get_thread()` / `dbg.get_snap()` | Current thread and snapshot index |
 | `dbg.get_event_thread()` | The faulting thread that caused the current break: `{tid, name, key, thread}` (`thread` is the raw `TraceThread` for `get_registers(thread=…)`) — not the parked worker `get_thread()` often returns |
@@ -491,12 +491,12 @@ A `reng` helper object is pre-injected for reverse-engineering workflows. Works 
 For managing script files, use the `scripts` MCP tool (list/read/write/run/delete) rather than the analysis prelude.
 
 Typical dynamic-analysis workflow (all via `eval_python` + the `dbg` helper):
-1. `dbg.attach(<pid>)` — attach to a running process (`dbg.list_attach_offers()` lists backends); creates the session
+1. `dbg.attach(<pid>)` — attach to a running process (`dbg.list_attach_offers()` lists backends); creates the session. Pass `mode='observe'` for read-only work (live struct/singleton exploration) — the target is never suspended, so it's safe against a real/HMD session; the default `mode='default'` is invasive and only needed for breakpoints/stepping/register writes.
 2. `dbg.status()` — confirm `connected: True`
-3. `dbg.get_registers()` / `dbg.read_memory(addr, n)` / `dbg.set_breakpoint(addr)` to inspect and instrument
-4. `dbg.resume()` / `dbg.interrupt()` to control execution; `dbg.detach()` when done
+3. `dbg.get_registers()` / `dbg.read_memory(addr, n)` / `dbg.set_breakpoint(addr)` to inspect and instrument (breakpoints/writes require `mode='default'`)
+4. `dbg.resume()` / `dbg.interrupt()` to control execution; `dbg.detach()` when done — its return value includes captured `last_event`/registers/stack, taken before the trace is closed
 
-To locate an object instance to inspect, use `reng.find_instances(class_or_vtable)`.
+To locate an object instance to inspect, use `reng.find_instances(class_or_vtable)`. For read-only live struct/singleton work end to end: `dbg.attach(pid, mode='observe')` → `reng.explore(addr)`/`find_instances`/`snapshot_state`+`diff_snapshot` → `reng.label(addr, fields)` to commit corrections → `dbg.detach()`.
 
 #### `eval_python` caveats
 
