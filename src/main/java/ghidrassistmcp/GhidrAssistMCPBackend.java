@@ -74,7 +74,7 @@ import ghidrassistmcp.tools.RenameSymbolBatchTool;
 import ghidrassistmcp.tools.RenameSymbolTool;
 import ghidrassistmcp.tools.PatchBytesTool;
 import ghidrassistmcp.tools.SaveProgramTool;
-import ghidrassistmcp.tools.ScriptsTool;
+import ghidrassistmcp.tools.GhidraScriptsTool;
 import ghidrassistmcp.tools.SearchBytesTool;
 import ghidrassistmcp.tools.SearchFunctionsByNameTool;
 import ghidrassistmcp.tools.SearchStringsTool;
@@ -180,7 +180,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         // Register tools that are disabled by default (security-sensitive)
         registerTool(new ImportFileTool());
         toolEnabledStates.put("import_file", false); // disabled by default: exposes host file-system read access
-        registerTool(new ScriptsTool());
+        registerTool(new GhidraScriptsTool());
         toolEnabledStates.put("scripts", false); // disabled by default: creates/deletes/runs host-side Ghidra scripts
         registerTool(new ExportProgramTool());
         toolEnabledStates.put("export_program", false); // disabled by default: writes files to host filesystem

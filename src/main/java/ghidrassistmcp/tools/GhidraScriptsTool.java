@@ -48,7 +48,7 @@ import ghidrassistmcp.McpTool;
 import ghidrassistmcp.tasks.McpTask;
 import io.modelcontextprotocol.spec.McpSchema;
 
-public class ScriptsTool implements McpTool {
+public class GhidraScriptsTool implements McpTool {
 
     @Override
     public String getName() { return "scripts"; }
