@@ -98,8 +98,11 @@ public class EvalPythonTool implements McpTool {
             "(rtti/class_hierarchy/vtable_methods), live instance location " +
             "(find_instances(class_or_vtable) finds object instances in target memory), " +
             "ReClass-style struct exploration over live trace memory " +
-            "(explore/follow/tree/diff/as_known/as_array), authoring " +
-            "(define_class/define_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
+            "(explore/follow/tree/diff/as_known/as_array), temporal diffing of a single " +
+            "singleton across an action via snapshot_state/diff_snapshot (diff() itself " +
+            "compares two different instances at once), one-call field commit+apply+verify " +
+            "via label(rt_addr, fields), authoring " +
+            "(define_class/define_struct/patch_struct/apply_struct), bulk (scan_vtables/rename_vfuncs).\n\n" +
             "Address handling: dbg.* memory + breakpoint methods accept EITHER a static\n" +
             "Ghidra address (0x14xxxxxxx in currentProgram's image range) OR a live runtime\n" +
             "address — translated automatically. Use reng.to_rt/to_static for explicit conversion.\n" +

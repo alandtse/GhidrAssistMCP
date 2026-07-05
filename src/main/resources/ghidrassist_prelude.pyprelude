@@ -1375,7 +1375,10 @@ dbg = DebuggerHelpers()
 
 class REngHelpers:
     '''Platform-agnostic reverse engineering utilities. Works best with dbg connected.
-    Workflow: reng.image_base() → reng.rtti(ptr) → reng.explore(ptr) → reng.define_struct(...)
+    Workflow: reng.image_base() → reng.rtti(ptr) → reng.explore(ptr) → reng.label(ptr, fields)
+    Temporal diffing (same singleton, before/after an action): reng.snapshot_state(ptr) →
+    trigger the action in-game → reng.diff_snapshot(ptr). Cross-instance diffing (two
+    objects of the same class right now): reng.diff(ptr1, ptr2).
     MSVC x64 RTTI layout: obj[0]=vtable_ptr, vtable[-8]=RTTICompleteObjectLocator (COL),
       COL+0=sig(1), COL+12=TypeDescriptor_RVA, TypeDescriptor+16=mangled_name(.?AV<class>@@)
     '''
@@ -1383,6 +1386,8 @@ class REngHelpers:
     # right values instead of leaking the previous program's image base/vtables.
     _image_base_cache = {}
     _vtable_cache = {}
+    # (rt_addr, label) -> bytes, for snapshot_state()/diff_snapshot() temporal diffing
+    _snapshot_cache = {}
 
     def _prog_key(self):
         return currentProgram.getName() if currentProgram else None
@@ -1983,6 +1988,52 @@ class REngHelpers:
         print('Diff 0x%x vs 0x%x: %d differing slots out of %d' % (rt_addr1, rt_addr2, len(diffs), n//8))
         return diffs
 
+    def snapshot_state(self, rt_addr, size=256, label=None):
+        '''Capture live bytes at rt_addr now, for later temporal diffing via diff_snapshot().
+        The single-instance complement to diff() (which compares two DIFFERENT instances
+        at the same moment): freeze a singleton's state, trigger something in-game (take
+        damage, open a menu, advance a timer), then diff_snapshot() to see exactly which
+        offsets changed. label distinguishes multiple snapshots of the same address
+        (e.g. "before_damage"). Returns {ok, address, size, label} or {ok: False, error}.'''
+        dbg.refresh_memory(rt_addr, size)
+        raw = self._read_rt(rt_addr, size)
+        if not raw:
+            return {'ok': False, 'error': 'could not read 0x%x' % rt_addr}
+        self._snapshot_cache[(rt_addr, label)] = raw
+        return {'ok': True, 'address': '0x%x' % rt_addr, 'size': len(raw), 'label': label}
+
+    def diff_snapshot(self, rt_addr, size=256, label=None, threshold=0):
+        '''Diff current live memory at rt_addr against a snapshot taken earlier via
+        snapshot_state(). The temporal counterpart to diff(): use this to find which
+        offsets changed when the SAME object's state changed over time, rather than
+        comparing two different instances. Must call snapshot_state(rt_addr, ..., label)
+        first with the same rt_addr/label.
+        Returns list of {offset, hex_off, before, after, delta, as_f32_before, as_f32_after}
+        for differing 8-byte slots, or {error} if no matching snapshot exists.'''
+        import struct as _st
+        before = self._snapshot_cache.get((rt_addr, label))
+        if before is None:
+            return {'error': 'no snapshot for 0x%x (label=%r) — call snapshot_state first' % (rt_addr, label)}
+        dbg.refresh_memory(rt_addr, size)
+        after = self._read_rt(rt_addr, size)
+        if not after:
+            return {'error': 'could not read 0x%x' % rt_addr}
+        diffs = []
+        n = min(len(before), len(after))
+        for off in range(0, n - 7, 8):
+            v1 = _st.unpack_from('<Q', before, off)[0]
+            v2 = _st.unpack_from('<Q', after, off)[0]
+            if v1 != v2:
+                delta = abs(v2 - v1)
+                if delta > threshold:
+                    f1 = _st.unpack_from('<f', before, off)[0]
+                    f2 = _st.unpack_from('<f', after, off)[0]
+                    diffs.append({'offset': off, 'hex_off': '+0x%x' % off,
+                                  'before': v1, 'after': v2, 'delta': delta,
+                                  'as_f32_before': f1, 'as_f32_after': f2})
+        print('diff_snapshot 0x%x (label=%r): %d differing slots out of %d' % (rt_addr, label, len(diffs), n // 8))
+        return diffs
+
     def class_hierarchy(self, rt_ptr):
         '''Decode full MSVC RTTI inheritance chain for a live object.
         Returns ordered list of {class, offset, bases} from most-derived to base.
@@ -2288,6 +2339,32 @@ class REngHelpers:
         except Exception as e:
             _end_tx(currentProgram, tx)
             return 'Error: ' + str(e)
+
+    def label(self, rt_addr, fields, struct_name=None, force=False):
+        '''One-call commit+apply+verify for the explore()-then-fix loop.
+        Instead of patch_struct/define_struct -> apply_struct -> explore() as three
+        separate eval_python round-trips (re-typing offsets between each), this does
+        all three in one call and returns the refreshed explore() view so you can see
+        immediately whether the field looks right.
+        fields = {field_name: (offset, size, comment)} — same shape as patch_struct/define_struct.
+        struct_name: defaults to the RTTI class name of rt_addr if omitted; pass explicitly
+        for non-polymorphic structs (no vtable, so RTTI can't identify them).
+        force: passed through to patch_struct — overwrite established (non-provisional)
+        field names too. New structs are always created via define_struct regardless of force.
+        Returns {struct, action, patch_result, apply_result, explore} or {error}.'''
+        name = struct_name or self.rtti(rt_addr)
+        if not name:
+            return {'error': 'no struct_name given and RTTI resolution failed — pass struct_name explicitly'}
+        existing = self._find_dt(name)
+        if existing is None:
+            patch_result = self.define_struct(name, fields)
+            action = 'created'
+        else:
+            patch_result = self.patch_struct(name, fields, force=force)
+            action = 'patched'
+        apply_result = self.apply_struct(rt_addr, name, is_runtime=True)
+        return {'struct': name, 'action': action, 'patch_result': str(patch_result),
+                'apply_result': apply_result, 'explore': self.explore(rt_addr)}
 
     def as_known(self, rt_addr, offset, struct_name):
         '''Read an inline (non-pointer) sub-struct embedded at rt_addr+offset.

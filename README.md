@@ -468,6 +468,8 @@ A `reng` helper object is pre-injected for reverse-engineering workflows. Works 
 | `reng.follow(rt_addr, offset)` | Dereference the pointer at `[rt_addr+offset]` and `explore()` the sub-object |
 | `reng.tree(rt_addr, depth=2, max_ptrs=8, size=128)` | Recursive exploration that follows pointer fields |
 | `reng.diff(rt_addr1, rt_addr2, size=256, threshold=0)` | Compare two instances; returns differing 8-byte slots — the "damage one Actor, diff to find health" technique |
+| `reng.snapshot_state(rt_addr, size=256, label=None)` | Capture bytes now for later temporal diffing — the single-singleton complement to `diff()` |
+| `reng.diff_snapshot(rt_addr, size=256, label=None, threshold=0)` | Diff current memory against a `snapshot_state()` capture — freeze a singleton, trigger an action in-game, see what changed |
 | `reng.as_array(rt_addr, offset, count, type_str='f32')` | Read N consecutive typed values (`f32`/`u32`/`ptr`/...) |
 | `reng.as_known(rt_addr, offset, struct_name)` | Read an inline embedded sub-struct using a Ghidra DataType name (e.g. `NiPoint3` for an embedded XYZ) |
 | `reng.read_struct(rt_addr, {fname: (off, type)})` | Read named fields from an explicit field map |
@@ -483,6 +485,7 @@ A `reng` helper object is pre-injected for reverse-engineering workflows. Works 
 | `reng.patch_struct(name, fields, force=False)` | Targeted field update for partially RE'd projects: overwrites provisional names (`unk*`/`pad*`/`gap*`/`field_*`) freely; `force=True` to overwrite established names |
 | `reng.is_provisional(field_name)` | True if name matches `reng.PROVISIONAL_PREFIXES` (configurable per project) |
 | `reng.apply_struct(addr, struct_name, is_runtime=False)` | Apply a Ghidra DataType to an address in the Listing view |
+| `reng.label(rt_addr, fields, struct_name=None, force=False)` | One-call commit+apply+verify: patches/creates the struct, applies it, and returns the refreshed `explore()` view — collapses the usual 3-round-trip fix loop into one |
 | `reng.rename_function(static_addr, new_name, namespace=None)` | Rename a function (USER_DEFINED source; survives re-analysis); optional class namespace |
 
 For managing script files, use the `scripts` MCP tool (list/read/write/run/delete) rather than the analysis prelude.
