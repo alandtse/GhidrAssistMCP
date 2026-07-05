@@ -175,7 +175,7 @@ GhidrAssistMCP provides 54 tools organized into categories. Several tools use an
 | `save_program` | Save a program's pending changes to the Ghidra project (use after `eval_python`, which cannot save from inside its own transaction) |
 | `import_file` | Import a host file into the current Ghidra project and optionally open it *(disabled by default)* |
 | `project_files` | List or delete files/folders in the active Ghidra project; deletion requires `confirm=true` |
-| `scripts` | List/read/create/delete/run Ghidra scripts *(disabled by default)* |
+| `scripts` | List/read/write/delete/run Ghidra scripts *(disabled by default)* |
 | `assemble_code` | Assemble instruction text at an address and optionally patch it into program memory |
 | `patch_bytes` | Patch raw bytes in program memory at a given address |
 | `export_program` | Export the current program to disk (`binary` or `original_file`) *(disabled by default)* |
@@ -202,15 +202,15 @@ Bootstrap a session from MCP without the Ghidra GUI. `import_file` (above, disab
 
 #### `scripts` - Ghidra Script Management
 
-Manage and run scripts in the user's Ghidra scripts directory (`~/ghidra_scripts`). Scripts written here appear in Ghidra's Script Manager after clicking Refresh.
+Manage and run scripts across all enabled script sources (user scripts in `~/ghidra_scripts` plus bundled/system scripts). Writes and deletes are restricted to the user script directory. Scripts written here appear in Ghidra's Script Manager after clicking Refresh.
 
 | Action | Description |
 | ------ | ----------- |
-| `list` | List `.py`/`.java` scripts with `name`, `category`, `description`, and `path` (optional `pattern` filename filter) |
-| `read` | Return the full source of a named script (`name`) |
-| `write` | Create or overwrite a script (`name`, `code`, optional `category` and `description`); prepends `@category`/`@description` metadata automatically |
-| `run` | Execute a named script in the current Ghidra context (`name`); output is captured and returned |
-| `delete` | Delete a script file (`name`) |
+| `list` | List scripts with `name`, `category`, `description`, `runtime`, and `path` (optional `pattern` filter, `user_only`, `offset`/`limit` pagination) |
+| `read` | Return the source of a named script (`name`); user scripts first, then any enabled script source; optional `max_bytes` cap |
+| `write` | Create or overwrite a user script (`name`, `code`, optional `category`, `description`); prepends `@category`/`@description` metadata automatically; requires `overwrite=true` to replace an existing script |
+| `run` | Execute a named script in the current Ghidra context (`name`, optional `args`); runs as an async task when the task manager is available; output is captured and returned |
+| `delete` | Delete a user script file (`name`); requires `confirm=true` |
 
 ### Function Discovery & Analysis
 
@@ -886,7 +886,7 @@ GhidrAssistMCP/
 - `analysis_options`: `action: list|set|reset|save_preset|apply_preset|list_presets|delete_preset`
 - `analysis_control`: `action: status|cancel`
 - `project_files`: `action: list|delete`
-- `scripts`: `action: list|get|create|delete|run`
+- `scripts`: `action: list|read|write|delete|run`
 
 **Tool Interface Methods**:
 

@@ -2,11 +2,11 @@
  * MCP tool for Ghidra script management.
  *
  * Actions:
- * - list:   List all scripts in the user scripts directory with metadata
- * - read:   Return the source of a named script
- * - write:  Write (create or overwrite) a script file
+ * - list:   List scripts across all enabled script source directories with metadata
+ * - read:   Return the source of a named script (user scripts, or any script by name)
+ * - write:  Write (create or overwrite) a script file in the user script directory
  * - run:    Execute a named script in the current Ghidra context
- * - delete: Delete a named script file
+ * - delete: Delete a named script file from the user script directory
  *
  * Scripts written here appear in Ghidra's Script Manager after clicking Refresh.
  * Scripts must conform to GhidraScript conventions (use currentProgram, monitor, etc.).
@@ -14,18 +14,19 @@
  */
 package ghidrassistmcp.tools;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 import generic.jar.ResourceFile;
 import ghidra.app.script.GhidraScript;
@@ -33,12 +34,18 @@ import ghidra.app.script.GhidraScriptProvider;
 import ghidra.app.script.GhidraScriptUtil;
 import ghidra.app.script.GhidraState;
 import ghidra.app.script.ScriptControls;
+import ghidra.app.script.ScriptInfo;
+import ghidra.framework.model.Project;
+import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
+import ghidra.program.util.ProgramLocation;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
-import ghidrassistmcp.GhidrAssistMCPPlugin;
+import ghidrassistmcp.GhidrAssistMCPManager;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.tasks.McpTask;
 import io.modelcontextprotocol.spec.McpSchema;
 
 public class ScriptsTool implements McpTool {
@@ -53,17 +60,26 @@ public class ScriptsTool implements McpTool {
             in Ghidra's Script Manager after clicking Refresh (green arrow).
 
             Actions:
-              list   — List all .py/.java scripts with name, category, description, and path
-                        Optional filter: {"pattern": "actor"} to match filename substring
-              read   — Return the full source of a named script: {"name": "FindActors.py"}
-              write  — Create or overwrite a script: {"name": "...", "code": "...", \
-                        "category": "MCP", "description": "..."}
-                        @category and @description metadata prepended automatically if absent.
-                        Script appears in Script Manager after Refresh.
-              run    — Execute a script in the current Ghidra context: {"name": "FindActors.py"}
-                        Output is captured and returned. Script has access to currentProgram, \
-                        monitor, state. Equivalent to running from Script Manager.
-              delete — Delete a script file: {"name": "FindActors.py"}
+              list   — List scripts (user + system) with name, category, description, and path.
+                        Optional: {"pattern": "actor"} filename substring filter, \
+                        {"user_only": true} to restrict to the user script directory, \
+                        {"offset": 0, "limit": 200} for pagination.
+              read   — Return the source of a named script: {"name": "FindActors.py"}. \
+                        Looks in the user script directory first, then falls back to any \
+                        enabled script source (bundled Ghidra scripts, other extensions). \
+                        Optional {"max_bytes": 65536} to cap output size.
+              write  — Create or overwrite a user script: {"name": "...", "code": "...", \
+                        "category": "MCP", "description": "..."}. Restricted to the user \
+                        script directory. @category and @description metadata prepended \
+                        automatically if absent. Pass {"overwrite": true} to replace an \
+                        existing script; refuses otherwise. Script appears in Script Manager \
+                        after Refresh.
+              run    — Execute a script in the current Ghidra context: {"name": "FindActors.py"}. \
+                        Optional {"args": ["a", "b"]} passed as script arguments. Output is \
+                        captured and returned. Script has access to currentProgram, monitor, state. \
+                        Equivalent to running from Script Manager.
+              delete — Delete a user script file: {"name": "FindActors.py", "confirm": true}. \
+                        Restricted to the user script directory.
 
             Workflow — LLM as RE tool generator:
               1. `scripts list` to see what already exists (GhidrOllama, importers, etc.)
@@ -76,228 +92,417 @@ public class ScriptsTool implements McpTool {
     }
 
     @Override
+    public boolean isReadOnly() { return false; }
+    @Override public boolean isLongRunning() { return false; }
+    @Override public boolean isCacheable() { return false; }
+    @Override public boolean isDestructive() { return true; }
+    @Override public boolean isIdempotent() { return false; }
+    @Override public boolean isOpenWorld() { return true; }
+
+    @Override
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object",
-            Map.of(
-                "action", Map.of(
+            Map.ofEntries(
+                Map.entry("action", Map.of(
                     "type", "string",
                     "enum", List.of("list", "read", "write", "run", "delete"),
                     "description", "Action to perform"
-                ),
-                "name", Map.of(
+                )),
+                Map.entry("name", Map.of(
                     "type", "string",
                     "description", "Script filename (e.g. 'FindActors.py'). .py extension added if omitted."
-                ),
-                "code", Map.of(
+                )),
+                Map.entry("code", Map.of(
                     "type", "string",
                     "description", "Script source code (for write action)"
-                ),
-                "category", Map.of(
+                )),
+                Map.entry("category", Map.of(
                     "type", "string",
                     "description", "Script Manager category (for write action, default: MCP)"
-                ),
-                "description", Map.of(
+                )),
+                Map.entry("description", Map.of(
                     "type", "string",
                     "description", "Short description shown in Script Manager (for write action)"
-                ),
-                "pattern", Map.of(
+                )),
+                Map.entry("overwrite", Map.of(
+                    "type", "boolean",
+                    "description", "For action='write': overwrite an existing user script. Default: false",
+                    "default", false
+                )),
+                Map.entry("confirm", Map.of(
+                    "type", "boolean",
+                    "description", "Required true for action='delete'"
+                )),
+                Map.entry("pattern", Map.of(
                     "type", "string",
                     "description", "Filename substring filter (for list action)"
-                )
+                )),
+                Map.entry("user_only", Map.of(
+                    "type", "boolean",
+                    "description", "For action='list': only list scripts in the user script directory. Default: false",
+                    "default", false
+                )),
+                Map.entry("offset", Map.of(
+                    "type", "integer",
+                    "description", "For action='list': number of matching scripts to skip. Default: 0",
+                    "default", 0,
+                    "minimum", 0
+                )),
+                Map.entry("limit", Map.of(
+                    "type", "integer",
+                    "description", "For action='list': maximum scripts to return. Default: 200",
+                    "default", 200,
+                    "minimum", 1
+                )),
+                Map.entry("max_bytes", Map.of(
+                    "type", "integer",
+                    "description", "For action='read': maximum source bytes to return. Default: 65536",
+                    "default", 65536,
+                    "minimum", 1
+                )),
+                Map.entry("args", Map.of(
+                    "type", "array",
+                    "description", "For action='run': script arguments",
+                    "items", Map.of("type", "string")
+                ))
             ),
             List.of("action"), null, null, null);
     }
 
-    @Override public boolean isReadOnly() { return false; }
-    @Override public boolean isLongRunning() { return false; }
-    @Override public boolean isCacheable() { return false; }
-    @Override public boolean isDestructive() { return false; }
-    @Override public boolean isIdempotent() { return false; }
-
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
-        return McpSchema.CallToolResult.builder()
-            .addTextContent("Error: scripts tool requires a backend reference.")
-            .build();
+        return execute(arguments, currentProgram, null);
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
             GhidrAssistMCPBackend backend) {
-        String action = (String) arguments.get("action");
-        if (action == null) action = "list";
+        String action = stringArg(arguments.get("action"), "list");
 
-        File scriptsDir = getScriptsDir(backend);
-
-        return switch (action) {
-            case "list"   -> doList(scriptsDir, (String) arguments.get("pattern"));
-            case "read"   -> doRead(scriptsDir, (String) arguments.get("name"));
-            case "write"  -> doWrite(scriptsDir, arguments);
-            case "run"    -> doRun(scriptsDir, (String) arguments.get("name"), currentProgram, backend);
-            case "delete" -> doDelete(scriptsDir, (String) arguments.get("name"));
-            default -> McpSchema.CallToolResult.builder()
-                .addTextContent("Unknown action: " + action)
-                .build();
-        };
-    }
-
-    private File getScriptsDir(GhidrAssistMCPBackend backend) {
-        // Try GhidraScriptUtil first
         try {
-            List<ResourceFile> dirs = GhidraScriptUtil.getScriptSourceDirectories();
-            if (dirs != null && !dirs.isEmpty()) {
-                File f = dirs.get(0).getFile(false);
-                if (f != null && f.isDirectory()) return f;
-            }
+            return switch (action) {
+                case "list" -> doList(arguments);
+                case "read" -> doRead(arguments);
+                case "write" -> doWrite(arguments);
+                case "run" -> doRun(arguments, currentProgram, backend);
+                case "delete" -> doDelete(arguments);
+                default -> textResult("Unknown action: " + action);
+            };
         } catch (Exception e) {
-            Msg.warn(this, "Could not get script dirs from GhidraScriptUtil", e);
+            Msg.error(this, "scripts tool failed", e);
+            return textResult("scripts " + action + " failed: " +
+                e.getClass().getSimpleName() + ": " + e.getMessage());
         }
-        // Fallback: ~/ghidra_scripts
-        return new File(System.getProperty("user.home"), "ghidra_scripts");
     }
 
-    private String normalize(String name) {
-        if (name == null) return null;
-        return (name.endsWith(".py") || name.endsWith(".java")) ? name : name + ".py";
-    }
+    private McpSchema.CallToolResult doList(Map<String, Object> arguments) {
+        String filter = stringArg(arguments.get("pattern"), null);
+        String normalizedFilter = filter != null ? filter.toLowerCase() : null;
+        boolean userOnly = Boolean.TRUE.equals(arguments.get("user_only"));
+        int offset = numberArg(arguments.get("offset"), 0);
+        int limit = numberArg(arguments.get("limit"), 200);
 
-    private McpSchema.CallToolResult doList(File scriptsDir, String pattern) {
-        if (!scriptsDir.isDirectory()) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Scripts directory not found: " + scriptsDir)
-                .build();
+        ResourceFile userDir = getUserScriptDirectory();
+        List<ResourceFile> roots = userOnly ? List.of(userDir) :
+            GhidraScriptUtil.getEnabledScriptSourceDirectories();
+
+        List<ScriptRow> rows = new ArrayList<>();
+        for (ResourceFile root : roots) {
+            collectScripts(root, userDir, normalizedFilter, rows);
         }
-        File[] files = scriptsDir.listFiles(f ->
-            (f.getName().endsWith(".py") || f.getName().endsWith(".java")) &&
-            (pattern == null || f.getName().toLowerCase().contains(pattern.toLowerCase()))
-        );
-        if (files == null || files.length == 0) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("No scripts found in " + scriptsDir +
-                    (pattern != null ? " matching '" + pattern + "'" : ""))
-                .build();
-        }
-        Arrays.sort(files);
+        rows.sort(Comparator.comparing(row -> row.name, String.CASE_INSENSITIVE_ORDER));
+
+        int end = Math.min(rows.size(), offset + limit);
         StringBuilder sb = new StringBuilder();
-        sb.append("Scripts in ").append(scriptsDir).append(" (").append(files.length).append("):\n\n");
-        for (File f : files) {
-            String[] meta = readScriptMeta(f);
-            sb.append(String.format("%-35s  %-20s  %s%n", f.getName(), meta[0], meta[1]));
-        }
-        return McpSchema.CallToolResult.builder().addTextContent(sb.toString()).build();
-    }
-
-    private String[] readScriptMeta(File f) {
-        String category = "", description = "";
-        try {
-            List<String> lines = Files.readAllLines(f.toPath(), StandardCharsets.UTF_8);
-            for (String line : lines) {
-                if (!line.startsWith("#") && !line.trim().isEmpty()) break;
-                if (line.contains("@category"))    category    = line.replaceFirst(".*@category\\s*", "").trim();
-                if (line.contains("@description")) description = line.replaceFirst(".*@description\\s*", "").trim();
+        sb.append("Ghidra Scripts\n\n");
+        for (int i = offset; i < end; i++) {
+            ScriptRow row = rows.get(i);
+            sb.append("- ").append(row.name).append("\n");
+            sb.append("  Runtime: ").append(row.runtime).append("\n");
+            sb.append("  Scope: ").append(row.userScript ? "user" : "system").append("\n");
+            sb.append("  Path: ").append(row.path).append("\n");
+            if (!row.category.isBlank()) {
+                sb.append("  Category: ").append(row.category).append("\n");
             }
-        } catch (IOException ignored) {}
-        return new String[]{category, description};
-    }
-
-    private McpSchema.CallToolResult doRead(File scriptsDir, String name) {
-        if (name == null) return McpSchema.CallToolResult.builder()
-            .addTextContent("'name' parameter required").build();
-        File f = new File(scriptsDir, normalize(name));
-        if (!f.exists()) return McpSchema.CallToolResult.builder()
-            .addTextContent("Script not found: " + f.getAbsolutePath()).build();
-        try {
-            String content = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("// " + f.getAbsolutePath() + "\n\n" + content)
-                .build();
-        } catch (IOException e) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Error reading script: " + e.getMessage()).build();
+            if (!row.description.isBlank()) {
+                sb.append("  Description: ").append(row.description).append("\n");
+            }
         }
+        sb.append("\nShowing ").append(Math.max(0, end - offset))
+          .append(" of ").append(rows.size()).append(" matching script(s)");
+        if (offset > 0) {
+            sb.append(" (offset ").append(offset).append(")");
+        }
+        sb.append("\nUser script directory: ").append(userDir.getAbsolutePath());
+        return textResult(sb.toString());
     }
 
-    private McpSchema.CallToolResult doWrite(File scriptsDir, Map<String, Object> args) {
-        String name = normalize((String) args.get("name"));
-        String code = (String) args.get("code");
-        if (name == null || code == null) return McpSchema.CallToolResult.builder()
-            .addTextContent("'name' and 'code' parameters required").build();
+    private McpSchema.CallToolResult doRead(Map<String, Object> arguments) throws IOException {
+        String name = requiredName(arguments);
+        ResourceFile script = resolveExistingScript(name, true);
+        int maxBytes = numberArg(arguments.get("max_bytes"), 65536);
+        if (maxBytes < 1) {
+            maxBytes = 65536;
+        }
 
-        String category = args.getOrDefault("category", "MCP").toString();
-        String desc = args.getOrDefault("description", "").toString();
+        byte[] bytes;
+        boolean truncated;
+        try (InputStream input = script.getInputStream()) {
+            bytes = readUpTo(input, maxBytes + 1);
+            truncated = bytes.length > maxBytes;
+        }
+        if (truncated) {
+            byte[] trimmed = new byte[maxBytes];
+            System.arraycopy(bytes, 0, trimmed, 0, maxBytes);
+            bytes = trimmed;
+        }
 
-        // Prepend metadata if missing
+        StringBuilder sb = new StringBuilder();
+        sb.append("// ").append(script.getAbsolutePath()).append("\n");
+        sb.append("// Provider: ").append(providerName(script)).append("\n");
+        if (truncated) {
+            sb.append("// Truncated at ").append(maxBytes).append(" bytes\n");
+        }
+        sb.append("\n").append(new String(bytes, StandardCharsets.UTF_8));
+        return textResult(sb.toString());
+    }
+
+    private McpSchema.CallToolResult doWrite(Map<String, Object> arguments) throws IOException {
+        String name = requiredName(arguments);
+        String code = stringArg(arguments.get("code"), null);
+        if (code == null) {
+            return textResult("'code' parameter required");
+        }
+
+        ResourceFile script = resolveUserScriptPath(name, true);
+        File file = script.getFile(false);
+        if (file.exists() && !Boolean.TRUE.equals(arguments.get("overwrite"))) {
+            return textResult("User script already exists: " + file.getAbsolutePath() +
+                "\nPass overwrite=true to replace it.");
+        }
+
+        String category = arguments.getOrDefault("category", "MCP").toString();
+        String desc = arguments.getOrDefault("description", "").toString();
+        String comment = file.getName().endsWith(".java") ? "//" : "#";
+
         StringBuilder header = new StringBuilder();
-        if (!code.contains("@category"))    header.append("# @category ").append(category).append("\n");
-        if (!desc.isEmpty() && !code.contains("@description"))
-            header.append("# @description ").append(desc).append("\n");
-
-        if (!scriptsDir.isDirectory()) scriptsDir.mkdirs();
-        File f = new File(scriptsDir, name);
-        try {
-            Files.write(f.toPath(), (header + code).getBytes(StandardCharsets.UTF_8));
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Script written: " + f.getAbsolutePath() +
-                    "\nRefresh Script Manager (green arrow) to see it.")
-                .build();
-        } catch (IOException e) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Error writing script: " + e.getMessage()).build();
+        if (!code.contains("@category")) {
+            header.append(comment).append(" @category ").append(category).append("\n");
         }
+        if (!desc.isEmpty() && !code.contains("@description")) {
+            header.append(comment).append(" @description ").append(desc).append("\n");
+        }
+
+        Files.createDirectories(file.toPath().getParent());
+        Files.writeString(file.toPath(), header + code, StandardCharsets.UTF_8);
+        return textResult("Script written: " + file.getAbsolutePath() +
+            "\nRefresh Script Manager (green arrow) to see it.");
     }
 
-    private McpSchema.CallToolResult doRun(File scriptsDir, String name,
-            Program currentProgram, GhidrAssistMCPBackend backend) {
-        if (name == null) return McpSchema.CallToolResult.builder()
-            .addTextContent("'name' parameter required").build();
-        File f = new File(scriptsDir, normalize(name));
-        if (!f.exists()) return McpSchema.CallToolResult.builder()
-            .addTextContent("Script not found: " + f.getAbsolutePath()).build();
+    private McpSchema.CallToolResult doRun(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend) {
+        if (backend != null && backend.getTaskManager() != null) {
+            McpTask task = backend.getTaskManager().submitTask(
+                getName(), arguments, () -> runScript(arguments, currentProgram, backend));
+            return textResult("Script task submitted: " + task.getTaskId() +
+                "\nUse get_task_status with this task_id to retrieve the result.");
+        }
+        return runScript(arguments, currentProgram, backend);
+    }
 
-        ResourceFile sourceFile = new ResourceFile(f);
-        GhidraScriptProvider provider = GhidraScriptUtil.getProvider(sourceFile);
-        if (provider == null) return McpSchema.CallToolResult.builder()
-            .addTextContent("No script provider for: " + name +
-                " (is PyGhidra loaded for .py files?)").build();
+    private McpSchema.CallToolResult runScript(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend) {
+        StringWriter output = new StringWriter();
+        PrintWriter writer = new PrintWriter(output, true);
 
-        StringWriter sw = new StringWriter();
-        PrintWriter pw = new PrintWriter(sw);
         try {
-            GhidraScript script = provider.getScriptInstance(sourceFile, pw);
-            GhidrAssistMCPPlugin plugin = backend.getActivePlugin();
-            GhidraState scriptState;
-            if (plugin != null && plugin.getTool() != null) {
-                scriptState = new GhidraState(plugin.getTool(),
-                    plugin.getTool().getProject(), currentProgram, null, null, null);
-            } else {
-                scriptState = new GhidraState(null, null, currentProgram, null, null, null);
+            String name = requiredName(arguments);
+            ResourceFile scriptFile = resolveExistingScript(name, true);
+            GhidraScriptProvider provider = GhidraScriptUtil.getProvider(scriptFile);
+            if (provider == null) {
+                return textResult("No script provider for: " + name +
+                    " (is PyGhidra loaded for .py files?)");
             }
-            ScriptControls controls = new ScriptControls(pw, pw, TaskMonitor.DUMMY);
-            script.execute(scriptState, controls);
-            String output = sw.toString();
-            return McpSchema.CallToolResult.builder()
-                .addTextContent(output.isEmpty() ? "Script ran with no output." : output)
-                .build();
+
+            GhidraScript script = provider.getScriptInstance(scriptFile, writer);
+            script.setSourceFile(scriptFile);
+            List<String> args = AnalysisUtils.stringList(arguments.get("args"));
+            if (args != null) {
+                script.setScriptArgs(args.toArray(String[]::new));
+            }
+
+            GhidraState state = buildState(currentProgram, backend);
+            script.execute(state, new ScriptControls(writer, writer, TaskMonitor.DUMMY));
+
+            if (backend != null) {
+                backend.clearCache();
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Script completed: ").append(scriptFile.getName()).append("\n");
+            sb.append("Provider: ").append(provider.getDescription()).append("\n\n");
+            String text = output.toString();
+            sb.append(text.isEmpty() ? "Script ran with no output." : text.trim());
+            return textResult(sb.toString());
         } catch (Exception e) {
-            Msg.error(this, "Error running script: " + name, e);
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Error running script: " + e.getMessage() + "\n" + sw)
-                .build();
+            Msg.error(this, "Failed to run script", e);
+            return textResult("Script failed: " + e.getClass().getSimpleName() + ": " +
+                e.getMessage() + "\n\nOutput before failure:\n" + output);
         }
     }
 
-    private McpSchema.CallToolResult doDelete(File scriptsDir, String name) {
-        if (name == null) return McpSchema.CallToolResult.builder()
-            .addTextContent("'name' parameter required").build();
-        File f = new File(scriptsDir, normalize(name));
-        if (!f.exists()) return McpSchema.CallToolResult.builder()
-            .addTextContent("Script not found: " + f.getAbsolutePath()).build();
-        if (f.delete()) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Deleted: " + f.getAbsolutePath()).build();
-        } else {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Could not delete: " + f.getAbsolutePath()).build();
+    private GhidraState buildState(Program currentProgram, GhidrAssistMCPBackend backend) {
+        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
+        PluginTool tool = manager.getActiveTool();
+        Project project = tool != null ? tool.getProject() : null;
+        Address currentAddress = null;
+        if (backend != null && backend.getActivePlugin() != null) {
+            currentAddress = backend.getActivePlugin().getCurrentAddress();
         }
+        ProgramLocation location =
+            currentProgram != null && currentAddress != null ? new ProgramLocation(currentProgram, currentAddress) : null;
+        return new GhidraState(tool, project, currentProgram, location, null, null);
+    }
+
+    private McpSchema.CallToolResult doDelete(Map<String, Object> arguments) throws IOException {
+        if (!Boolean.TRUE.equals(arguments.get("confirm"))) {
+            return textResult("Refusing to delete. Pass confirm=true to delete a user script.");
+        }
+
+        String name = requiredName(arguments);
+        ResourceFile script = resolveUserScriptPath(name, false);
+        if (!script.exists() || !script.isFile()) {
+            return textResult("User script not found: " + script.getAbsolutePath());
+        }
+
+        GhidraScriptProvider provider = GhidraScriptUtil.getProvider(script);
+        boolean deleted = provider != null ? provider.deleteScript(script) : script.delete();
+        if (!deleted && script.exists()) {
+            return textResult("Failed to delete user script: " + script.getAbsolutePath());
+        }
+        return textResult("Deleted user script: " + script.getAbsolutePath());
+    }
+
+    private void collectScripts(ResourceFile root, ResourceFile userDir, String filter, List<ScriptRow> rows) {
+        ResourceFile[] children = root.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (ResourceFile child : children) {
+            if (child.isDirectory()) {
+                collectScripts(child, userDir, filter, rows);
+                continue;
+            }
+            if (!GhidraScriptUtil.hasScriptProvider(child)) {
+                continue;
+            }
+            if (filter != null && !child.getName().toLowerCase().contains(filter)) {
+                continue;
+            }
+            ScriptInfo info = GhidraScriptUtil.newScriptInfo(child);
+            rows.add(new ScriptRow(
+                info.getName(),
+                info.getRuntimeEnvironmentName(),
+                String.join("/", info.getCategory()),
+                nullToEmpty(info.getDescription()),
+                child.getAbsolutePath(),
+                userDir.containsPath(child)));
+        }
+    }
+
+    private ResourceFile resolveExistingScript(String name, boolean allowSystem) throws IOException {
+        ResourceFile userScript = resolveUserScriptPath(name, false);
+        if (userScript.exists() && userScript.isFile()) {
+            return userScript;
+        }
+        if (allowSystem) {
+            ResourceFile found = GhidraScriptUtil.findScriptByName(name);
+            if (found != null) {
+                return found;
+            }
+        }
+        throw new IOException("Script not found: " + name);
+    }
+
+    private ResourceFile resolveUserScriptPath(String name, boolean defaultPyExtension) throws IOException {
+        String normalizedName = name.trim().replace('\\', '/');
+        if (normalizedName.isBlank() || normalizedName.startsWith("/") || normalizedName.contains(":")) {
+            throw new IOException("Script name must be a relative path inside the user script directory.");
+        }
+        if (defaultPyExtension && !normalizedName.contains(".")) {
+            normalizedName += ".py";
+        }
+
+        ResourceFile userDir = getUserScriptDirectory();
+        Path root = userDir.getFile(false).toPath().toAbsolutePath().normalize();
+        Path target = root.resolve(normalizedName).normalize();
+        if (!target.startsWith(root)) {
+            throw new IOException("Script path escapes the user script directory: " + name);
+        }
+        return new ResourceFile(target.toFile());
+    }
+
+    private ResourceFile getUserScriptDirectory() {
+        ResourceFile userDir = GhidraScriptUtil.getUserScriptDirectory();
+        if (!userDir.exists()) {
+            userDir.mkdir();
+        }
+        return userDir;
+    }
+
+    private String providerName(ResourceFile script) {
+        GhidraScriptProvider provider = GhidraScriptUtil.getProvider(script);
+        return provider != null ? provider.getDescription() : "unknown";
+    }
+
+    private byte[] readUpTo(InputStream input, int maxBytes) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int remaining = maxBytes;
+        while (remaining > 0) {
+            int read = input.read(buffer, 0, Math.min(buffer.length, remaining));
+            if (read < 0) {
+                break;
+            }
+            output.write(buffer, 0, read);
+            remaining -= read;
+        }
+        return output.toByteArray();
+    }
+
+    private String requiredName(Map<String, Object> arguments) throws IOException {
+        String name = stringArg(arguments.get("name"), null);
+        if (name == null) {
+            throw new IOException("'name' parameter required");
+        }
+        return name;
+    }
+
+    private String stringArg(Object value, String defaultValue) {
+        if (value instanceof String text && !text.isBlank()) {
+            return text;
+        }
+        return defaultValue;
+    }
+
+    private int numberArg(Object value, int defaultValue) {
+        if (value instanceof Number number) {
+            return Math.max(0, number.intValue());
+        }
+        return defaultValue;
+    }
+
+    private String nullToEmpty(String value) {
+        return value != null ? value : "";
+    }
+
+    private McpSchema.CallToolResult textResult(String message) {
+        return McpSchema.CallToolResult.builder()
+            .addTextContent(message)
+            .build();
+    }
+
+    private record ScriptRow(String name, String runtime, String category, String description,
+                             String path, boolean userScript) {
     }
 }
