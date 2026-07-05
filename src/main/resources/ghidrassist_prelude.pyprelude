@@ -358,7 +358,7 @@ class DebuggerHelpers:
     # dbgeng never calls DebugActiveProcess, so the target is never stopped at all.
     ATTACH_FLAGS = {
         'default': 0x0,                      # DEBUG_ATTACH_DEFAULT — invasive, suspends
-        'observe': 0x4,                      # DEBUG_ATTACH_NONINVASIVE_NO_SUSPEND
+        'observe': 0x1 | 0x4,                # DEBUG_ATTACH_NONINVASIVE | _NO_SUSPEND (0x4 is a modifier of 0x1, not standalone)
     }
 
     def attach(self, pid, offer_title=None, wait_modules=True, module_timeout=8.0, mode='default'):
@@ -837,6 +837,10 @@ class DebuggerHelpers:
           1. INTERRUPT (if target is running)
           2. DETACH action (target keeps running, debugger releases it)
           3. closeTrace + close TraceRMI connection (frees Ghidra resources)
+        For a mode='observe' session there was nothing invasive to interrupt, so step 1
+        can take noticeably longer (observed ~15-20s vs near-instant for mode='default')
+        while the engine resolves that on its own; this is not a hang, just call this
+        via eval_python's default async execution (not sync=True) and poll.
         Returns {steps, forensics: {last_event, event_registers, stack}}.'''
         from ghidra.debug.api.target import ActionName, Target
         from ghidra.app.services import DebuggerTraceManagerService, TraceRmiService
