@@ -80,6 +80,18 @@ public class EvalPythonTool implements McpTool {
         return "Execute Python in Ghidra's context. Requires pyghidra (Python 3) or falls back to Jython 2.7. " +
             "Async by default: returns a task_id; poll get_task_status. Pass {\"sync\": true} for inline " +
             "result on quick scripts (<2s) — skips the poll round-trip.\n\n" +
+            "WARNING — rollback on failure/disconnect: Ghidra's own PyGhidraScriptProvider wraps this ENTIRE " +
+            "call in one outer transaction automatically, regardless of any transactions your own script " +
+            "opens/commits internally. If the MCP client-server connection drops, the extension reloads, or " +
+            "anything else interrupts the call before it returns, that outer transaction is rolled back — " +
+            "silently undoing everything the script did, even if the script's own logic already called " +
+            "endTransaction(..., true) and printed a success message. A printed 'success'/'complete' message " +
+            "from a script is therefore NOT proof the changes persisted if the call didn't cleanly return to " +
+            "the caller. After any long-running or connection-risky eval_python call (especially bulk/batch " +
+            "writes), independently re-verify the actual database state afterward (re-query the specific " +
+            "data you expected to change) rather than trusting the script's own printed output alone. For " +
+            "large write workloads, prefer many SMALL calls (each completing in well under a minute) over one " +
+            "large one, so an interruption loses at most one small batch instead of the whole run.\n\n" +
             "Globals: currentProgram, currentAddress, monitor, state. Symbol search: prefer " +
             "currentProgram.getSymbolTable().getSymbols('name') or getFunctionManager().getFunctions(True); " +
             "AVOID getSymbolIterator() (unbounded, can stall).\n\n" +
