@@ -102,6 +102,21 @@ public interface McpTool {
         return false;
     }
 
+    /**
+     * Default watchdog timeout (seconds) applied when this tool runs as an async task,
+     * counted from task creation (queue + run time). A caller can override per-call via
+     * {@code timeout_seconds} in the tool arguments, clamped to
+     * [{@link ghidrassistmcp.tasks.McpTaskManager#MIN_TASK_TIMEOUT_SECONDS},
+     * {@link ghidrassistmcp.tasks.McpTaskManager#MAX_TASK_TIMEOUT_SECONDS}]. Once a task
+     * exceeds its timeout it is marked TIMED_OUT; if the worker pool is then fully saturated,
+     * timed-out tasks are force-cancelled to reclaim capacity for new work. Tools whose normal
+     * workload legitimately runs longer (arbitrary scripts, full-program analysis) should
+     * override this rather than rely on the conservative default.
+     */
+    default int getDefaultTimeoutSeconds() {
+        return 30;
+    }
+
     // ==================== Caching Support ====================
 
     /**

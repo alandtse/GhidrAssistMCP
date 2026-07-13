@@ -9,9 +9,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -23,16 +25,39 @@ import io.modelcontextprotocol.spec.McpSchema;
 /**
  * Manages asynchronous MCP task execution and tracking.
  * Provides task submission, status tracking, and cancellation capabilities.
+ *
+ * <p>Every task runs under a watchdog timeout (default {@link #DEFAULT_TASK_TIMEOUT_SECONDS}s,
+ * overridable per-tool via {@link ghidrassistmcp.McpTool#getDefaultTimeoutSeconds()} and per-call
+ * via a {@code timeout_seconds} argument, clamped to [{@link #MIN_TASK_TIMEOUT_SECONDS},
+ * {@link #MAX_TASK_TIMEOUT_SECONDS}]). This exists because MCP clients (LLM agents) routinely
+ * ignore tool-description guidance and fire pathologically slow requests (e.g. "iterate every
+ * address in a 30MB binary"); without a backstop such a request pins a worker thread forever.
+ *
+ * <p>Escalation is two-tier, not a hard kill on every breach: exceeding the timeout only marks
+ * the task TIMED_OUT (unblocks the polling caller; the worker keeps running) because forcibly
+ * interrupting a Ghidra API call mid-transaction can silently roll back already-applied changes.
+ * Only when the worker pool is actually saturated does the watchdog force-cancel every timed-out
+ * task to reclaim capacity for new work — i.e. we get more draconian exactly as we approach
+ * exhaustion, and stay hands-off otherwise.
  */
 public class McpTaskManager {
 
     private static final int DEFAULT_THREAD_POOL_SIZE = 4;
     private static final int TASK_RETENTION_HOURS = 1;
     private static final int MAX_TERMINAL_TASKS = 200;
+    private static final int WATCHDOG_INTERVAL_SECONDS = 5;
+
+    /** Fallback timeout when a tool doesn't override {@link ghidrassistmcp.McpTool#getDefaultTimeoutSeconds()}. */
+    public static final int DEFAULT_TASK_TIMEOUT_SECONDS = 30;
+    /** Floor for any client-supplied {@code timeout_seconds} override. */
+    public static final int MIN_TASK_TIMEOUT_SECONDS = 5;
+    /** Ceiling for any client-supplied {@code timeout_seconds} override — "nearly unbounded" but still finite. */
+    public static final int MAX_TASK_TIMEOUT_SECONDS = 3600;
 
     private final Map<String, McpTask> tasks = new ConcurrentHashMap<>();
     private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
-    private final ExecutorService executor;
+    private final ThreadPoolExecutor executor;
+    private final ScheduledExecutorService watchdog;
 
     /**
      * Create a new task manager with default thread pool size
@@ -45,17 +70,43 @@ public class McpTaskManager {
      * Create a new task manager with specified thread pool size
      */
     public McpTaskManager(int threadPoolSize) {
-        this.executor = Executors.newFixedThreadPool(threadPoolSize, r -> {
-            Thread t = new Thread(r);
-            t.setName("MCP-Task-" + t.threadId());
+        this.executor = new ThreadPoolExecutor(threadPoolSize, threadPoolSize, 0L, TimeUnit.MILLISECONDS,
+            new LinkedBlockingQueue<>(), r -> {
+                Thread t = new Thread(r);
+                t.setName("MCP-Task-" + t.threadId());
+                t.setDaemon(true);
+                return t;
+            });
+        this.watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "MCP-Task-Watchdog");
             t.setDaemon(true);
             return t;
         });
+        this.watchdog.scheduleAtFixedRate(this::sweepTimeouts,
+            WATCHDOG_INTERVAL_SECONDS, WATCHDOG_INTERVAL_SECONDS, TimeUnit.SECONDS);
         Msg.info(this, "McpTaskManager initialized with " + threadPoolSize + " threads");
     }
 
     /**
-     * Submit a new async task for execution
+     * Clamp a client-requested timeout (may be null) to the allowed range, falling back to
+     * {@code defaultSeconds} when absent.
+     */
+    public static int clampTimeoutSeconds(Object requested, int defaultSeconds) {
+        int seconds = defaultSeconds;
+        if (requested instanceof Number n) {
+            seconds = n.intValue();
+        } else if (requested instanceof String s) {
+            try {
+                seconds = Integer.parseInt(s.trim());
+            } catch (NumberFormatException ignored) {
+                // fall through to defaultSeconds
+            }
+        }
+        return Math.max(MIN_TASK_TIMEOUT_SECONDS, Math.min(MAX_TASK_TIMEOUT_SECONDS, seconds));
+    }
+
+    /**
+     * Submit a new async task for execution using the default timeout.
      *
      * @param toolName The name of the tool being executed
      * @param arguments The tool arguments
@@ -64,15 +115,31 @@ public class McpTaskManager {
      */
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
                                Supplier<McpSchema.CallToolResult> taskExecutor) {
-        return submitTask(toolName, arguments, task -> taskExecutor.get());
+        return submitTask(toolName, arguments, DEFAULT_TASK_TIMEOUT_SECONDS, task -> taskExecutor.get());
     }
 
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
+                               Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, DEFAULT_TASK_TIMEOUT_SECONDS, taskExecutor);
+    }
+
+    public McpTask submitTask(String toolName, Map<String, Object> arguments, int timeoutSeconds,
+                               Supplier<McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, timeoutSeconds, task -> taskExecutor.get());
+    }
+
+    /**
+     * Submit a new async task for execution with an explicit watchdog timeout.
+     *
+     * @param timeoutSeconds clamped to [{@link #MIN_TASK_TIMEOUT_SECONDS}, {@link #MAX_TASK_TIMEOUT_SECONDS}]
+     */
+    public McpTask submitTask(String toolName, Map<String, Object> arguments, int timeoutSeconds,
                                Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
         // Clean up old tasks before creating new ones
         cleanupOldTasks();
 
         McpTask task = new McpTask(toolName, arguments);
+        task.setTimeoutSeconds(Math.max(MIN_TASK_TIMEOUT_SECONDS, Math.min(MAX_TASK_TIMEOUT_SECONDS, timeoutSeconds)));
         tasks.put(task.getTaskId(), task);
 
         Future<?> future = executor.submit(() -> {
@@ -92,9 +159,55 @@ public class McpTaskManager {
         });
 
         taskFutures.put(task.getTaskId(), future);
-        Msg.info(this, "Task submitted: " + task.getTaskId() + " for tool: " + toolName);
+        Msg.info(this, "Task submitted: " + task.getTaskId() + " for tool: " + toolName +
+            " (timeout=" + task.getTimeoutSeconds() + "s)");
 
         return task;
+    }
+
+    /**
+     * Watchdog sweep: mark overdue tasks TIMED_OUT, and — only once the pool is fully
+     * saturated — force-cancel every timed-out task's future to reclaim capacity.
+     */
+    private void sweepTimeouts() {
+        try {
+            Instant now = Instant.now();
+            for (McpTask task : tasks.values()) {
+                if (task.isTerminal()) {
+                    continue;
+                }
+                long elapsedSeconds = ChronoUnit.SECONDS.between(task.getCreatedAt(), now);
+                if (elapsedSeconds > task.getTimeoutSeconds()) {
+                    task.markTimedOut();
+                    Msg.warn(this, "Task timed out: " + task.getTaskId() + " (" + task.getToolName() +
+                        ") after " + elapsedSeconds + "s (limit " + task.getTimeoutSeconds() + "s)");
+                }
+            }
+
+            boolean saturated = executor.getActiveCount() >= executor.getCorePoolSize();
+            if (!saturated) {
+                return;
+            }
+
+            for (McpTask task : tasks.values()) {
+                if (task.getStatus() != McpTask.Status.TIMED_OUT) {
+                    continue;
+                }
+                Future<?> future = taskFutures.get(task.getTaskId());
+                if (future == null || future.isDone()) {
+                    continue;
+                }
+                future.cancel(true);
+                task.markCancelled("Auto-cancelled: exceeded " + task.getTimeoutSeconds() +
+                    "s timeout and the worker pool was saturated. If this task's own logic held an open " +
+                    "transaction, Ghidra's outer-transaction semantics may roll it back — re-verify any " +
+                    "expected changes rather than trusting the task's last progress message.");
+                Msg.warn(this, "Task force-cancelled under pool pressure: " + task.getTaskId() +
+                    " (" + task.getToolName() + ")");
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Watchdog sweep failed", e);
+        }
     }
 
     /**
@@ -144,7 +257,17 @@ public class McpTaskManager {
 
         if (task.getStatus() == McpTask.Status.CANCELLED) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Task was cancelled")
+                .addTextContent("Task was cancelled: " + task.getProgressMessage())
+                .build();
+        }
+
+        if (task.getStatus() == McpTask.Status.TIMED_OUT) {
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Task exceeded its " + task.getTimeoutSeconds() + "s timeout: " +
+                    task.getProgressMessage() + " Poll get_task_status again shortly — if the pool " +
+                    "later saturates this task will be force-cancelled; otherwise it may still complete " +
+                    "and its real result will replace this response. Consider re-running with a smaller " +
+                    "scope, or an explicit timeout_seconds argument if the work is legitimately long.")
                 .build();
         }
 
@@ -162,8 +285,10 @@ public class McpTaskManager {
             return false;
         }
 
-        if (task.isTerminal()) {
-            return false; // Can't cancel a completed task
+        // TIMED_OUT is terminal for client-reporting purposes but the worker may still be
+        // running in the background, so an explicit cancel is still meaningful for it.
+        if (task.isTerminal() && task.getStatus() != McpTask.Status.TIMED_OUT) {
+            return false; // Can't cancel a task that already finished/failed/was cancelled
         }
 
         Future<?> future = taskFutures.get(taskId);
@@ -171,7 +296,7 @@ public class McpTaskManager {
             future.cancel(true);
         }
 
-        task.markCancelled();
+        task.markCancelled("Cancelled by client request");
         Msg.info(this, "Task cancelled: " + taskId);
         return true;
     }
@@ -202,13 +327,17 @@ public class McpTaskManager {
         long completed = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.COMPLETED).count();
         long failed = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.FAILED).count();
         long cancelled = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.CANCELLED).count();
+        long timedOut = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.TIMED_OUT).count();
 
         sb.append("Total: ").append(tasks.size()).append("\n");
         sb.append("  Pending: ").append(pending).append("\n");
         sb.append("  Running: ").append(running).append("\n");
         sb.append("  Completed: ").append(completed).append("\n");
         sb.append("  Failed: ").append(failed).append("\n");
-        sb.append("  Cancelled: ").append(cancelled).append("\n\n");
+        sb.append("  Cancelled: ").append(cancelled).append("\n");
+        sb.append("  TimedOut: ").append(timedOut).append("\n");
+        sb.append("Worker pool: ").append(executor.getActiveCount()).append("/")
+          .append(executor.getCorePoolSize()).append(" active\n\n");
 
         if (!tasks.isEmpty()) {
             sb.append("Tasks:\n");
@@ -236,10 +365,12 @@ public class McpTaskManager {
     private void cleanupOldTasks() {
         Instant cutoff = Instant.now().minus(TASK_RETENTION_HOURS, ChronoUnit.HOURS);
 
-        // Time-based: anything terminal and older than retention
+        // Time-based: anything terminal and older than retention. TIMED_OUT tasks have no
+        // completedAt (the worker may still be running), so fall back to when the timeout
+        // itself elapsed as the reference point.
         List<String> toRemove = tasks.entrySet().stream()
             .filter(e -> e.getValue().isTerminal())
-            .filter(e -> e.getValue().getCompletedAt() != null && e.getValue().getCompletedAt().isBefore(cutoff))
+            .filter(e -> effectiveTerminalAt(e.getValue()) != null && effectiveTerminalAt(e.getValue()).isBefore(cutoff))
             .map(Map.Entry::getKey)
             .collect(Collectors.toList());
 
@@ -252,8 +383,8 @@ public class McpTaskManager {
             tasks.entrySet().stream()
                 .filter(e -> e.getValue().isTerminal())
                 .filter(e -> !toRemove.contains(e.getKey()))
-                .filter(e -> e.getValue().getCompletedAt() != null)
-                .sorted((a, b) -> a.getValue().getCompletedAt().compareTo(b.getValue().getCompletedAt()))
+                .filter(e -> effectiveTerminalAt(e.getValue()) != null)
+                .sorted((a, b) -> effectiveTerminalAt(a.getValue()).compareTo(effectiveTerminalAt(b.getValue())))
                 .limit(excess)
                 .map(Map.Entry::getKey)
                 .forEach(toRemove::add);
@@ -269,11 +400,23 @@ public class McpTaskManager {
         }
     }
 
+    /** completedAt if the task finished normally, else (for TIMED_OUT) when its timeout elapsed. */
+    private static Instant effectiveTerminalAt(McpTask task) {
+        if (task.getCompletedAt() != null) {
+            return task.getCompletedAt();
+        }
+        if (task.getStatus() == McpTask.Status.TIMED_OUT) {
+            return task.getCreatedAt().plusSeconds(task.getTimeoutSeconds());
+        }
+        return null;
+    }
+
     /**
      * Shutdown the task manager
      */
     public void shutdown() {
         Msg.info(this, "Shutting down McpTaskManager...");
+        watchdog.shutdownNow();
         executor.shutdown();
         try {
             if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {

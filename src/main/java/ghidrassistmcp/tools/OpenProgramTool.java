@@ -248,8 +248,10 @@ public class OpenProgramTool implements McpTool {
         }
 
         AnalyzeProgramTool analyzeTool = new AnalyzeProgramTool();
+        int timeoutSeconds = ghidrassistmcp.tasks.McpTaskManager.clampTimeoutSeconds(
+            arguments.get("timeout_seconds"), analyzeTool.getDefaultTimeoutSeconds());
         McpTask task = backend.getTaskManager().submitTask(
-            analyzeTool.getName(), taskArgs,
+            analyzeTool.getName(), taskArgs, timeoutSeconds,
             taskContext -> analyzeTool.execute(taskArgs, program, backend, taskContext));
 
         return "Analysis task submitted: " + task.getTaskId() +

@@ -43,6 +43,14 @@ public class AnalyzeProgramTool implements McpTool {
         return true;
     }
 
+    // Full-program auto-analysis on a large binary can legitimately run many minutes; it drives
+    // Ghidra's cooperative TaskMonitor (McpTaskMonitor), so unlike eval_python it's safe to
+    // actually cancel on timeout rather than just mark-and-wait.
+    @Override
+    public int getDefaultTimeoutSeconds() {
+        return 600;
+    }
+
     @Override
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object",

@@ -395,7 +395,10 @@ public class GhidrAssistMCPBackend implements McpBackend {
         // Create a reference to this backend for the async execution
         final GhidrAssistMCPBackend backend = this;
 
-        McpTask task = taskManager.submitTask(toolName, arguments, taskContext -> {
+        int timeoutSeconds = McpTaskManager.clampTimeoutSeconds(
+            arguments.get("timeout_seconds"), tool.getDefaultTimeoutSeconds());
+
+        McpTask task = taskManager.submitTask(toolName, arguments, timeoutSeconds, taskContext -> {
             try {
                 McpSchema.CallToolResult result =
                     tool.execute(arguments, targetProgram, backend, taskContext);
@@ -413,7 +416,9 @@ public class GhidrAssistMCPBackend implements McpBackend {
             .addTextContent("Task submitted for async execution.\n\n" +
                 "Task ID: " + task.getTaskId() + "\n" +
                 "Tool: " + toolName + "\n" +
-                "Status: " + task.getStatus() + "\n\n" +
+                "Status: " + task.getStatus() + "\n" +
+                "Timeout: " + timeoutSeconds + "s (override with \"timeout_seconds\" in arguments, " +
+                McpTaskManager.MIN_TASK_TIMEOUT_SECONDS + "-" + McpTaskManager.MAX_TASK_TIMEOUT_SECONDS + ")\n\n" +
                 "Use get_task_status with this task_id to check progress and retrieve results.\n" +
                 "Use cancel_task to cancel if needed.")
             .build();

@@ -22,7 +22,10 @@ public class McpTask {
         RUNNING,    // Task is currently executing
         COMPLETED,  // Task completed successfully
         FAILED,     // Task failed with an error
-        CANCELLED   // Task was cancelled
+        CANCELLED,  // Task was cancelled (explicitly, or auto-cancelled by the watchdog under pool pressure)
+        TIMED_OUT   // Task exceeded its watchdog timeout; the caller has been unblocked but the
+                    // worker thread may still be running in the background unless/until the pool
+                    // becomes saturated and the watchdog force-cancels it
     }
 
     private final String taskId;
@@ -36,6 +39,7 @@ public class McpTask {
     private volatile String errorMessage;
     private volatile int progressPercent;
     private volatile String progressMessage;
+    private volatile int timeoutSeconds;
 
     /**
      * Create a new task
@@ -96,6 +100,14 @@ public class McpTask {
         return progressMessage;
     }
 
+    public int getTimeoutSeconds() {
+        return timeoutSeconds;
+    }
+
+    public void setTimeoutSeconds(int timeoutSeconds) {
+        this.timeoutSeconds = timeoutSeconds;
+    }
+
     // State transition methods
 
     /**
@@ -120,10 +132,12 @@ public class McpTask {
     }
 
     /**
-     * Mark task as completed with result
+     * Mark task as completed with result. Still allowed from TIMED_OUT so a task that
+     * finishes late (after the watchdog already unblocked the caller) records its real
+     * outcome rather than being silently discarded.
      */
     public synchronized void markCompleted(McpSchema.CallToolResult taskResult) {
-        if (this.status == Status.RUNNING || this.status == Status.PENDING) {
+        if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.TIMED_OUT) {
             this.status = Status.COMPLETED;
             this.completedAt = Instant.now();
             this.result = taskResult;
@@ -136,7 +150,7 @@ public class McpTask {
      * Mark task as failed with error
      */
     public synchronized void markFailed(String taskErrorMessage) {
-        if (this.status == Status.RUNNING || this.status == Status.PENDING) {
+        if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.TIMED_OUT) {
             this.status = Status.FAILED;
             this.completedAt = Instant.now();
             this.errorMessage = taskErrorMessage;
@@ -148,19 +162,41 @@ public class McpTask {
      * Mark task as cancelled
      */
     public synchronized void markCancelled() {
-        if (this.status == Status.PENDING || this.status == Status.RUNNING) {
+        markCancelled("Cancelled");
+    }
+
+    /**
+     * Mark task as cancelled with a specific reason (e.g. auto-cancelled by the watchdog).
+     */
+    public synchronized void markCancelled(String reason) {
+        if (this.status == Status.PENDING || this.status == Status.RUNNING || this.status == Status.TIMED_OUT) {
             this.status = Status.CANCELLED;
             this.completedAt = Instant.now();
-            this.progressMessage = "Cancelled";
+            this.progressMessage = reason;
         }
     }
 
     /**
-     * Check if task is terminal (completed, failed, or cancelled)
+     * Mark task as having exceeded its watchdog timeout. Soft marker only: the underlying
+     * worker thread is NOT interrupted here (forcefully interrupting Ghidra API calls mid-flight
+     * can trigger a silent transaction rollback), it just tells the caller not to keep waiting.
+     * The task may still transition to COMPLETED/FAILED later, or to CANCELLED if the pool
+     * later saturates and the watchdog force-reclaims it.
+     */
+    public synchronized void markTimedOut() {
+        if (this.status == Status.PENDING || this.status == Status.RUNNING) {
+            this.status = Status.TIMED_OUT;
+            this.progressMessage = "Exceeded " + timeoutSeconds + "s timeout; still running in the " +
+                "background unless the worker pool saturates and forces cancellation.";
+        }
+    }
+
+    /**
+     * Check if task is terminal (completed, failed, cancelled, or timed out)
      */
     public boolean isTerminal() {
         Status s = this.status;
-        return s == Status.COMPLETED || s == Status.FAILED || s == Status.CANCELLED;
+        return s == Status.COMPLETED || s == Status.FAILED || s == Status.CANCELLED || s == Status.TIMED_OUT;
     }
 
     /**
@@ -183,6 +219,7 @@ public class McpTask {
         sb.append("Tool: ").append(toolName).append("\n");
         sb.append("Status: ").append(status).append("\n");
         sb.append("Progress: ").append(progressPercent).append("% - ").append(progressMessage).append("\n");
+        sb.append("Timeout: ").append(timeoutSeconds).append("s\n");
         sb.append("Created: ").append(createdAt).append("\n");
 
         if (startedAt != null) {

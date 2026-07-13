@@ -63,6 +63,12 @@ public class EvalPythonTool implements McpTool {
     @Override
     public boolean isLongRunning() { return true; }
 
+    // eval_python runs arbitrary scripts (RTTI scans, address iteration) that can legitimately
+    // take longer than the platform default; still bounded, still overridable per-call via
+    // {"timeout_seconds": N}. See EvalPythonTool docstring's timeout-cap warning below.
+    @Override
+    public int getDefaultTimeoutSeconds() { return 90; }
+
     @Override
     public boolean isCacheable() { return false; }
 
@@ -80,6 +86,14 @@ public class EvalPythonTool implements McpTool {
         return "Execute Python in Ghidra's context. Requires pyghidra (Python 3) or falls back to Jython 2.7. " +
             "Async by default: returns a task_id; poll get_task_status. Pass {\"sync\": true} for inline " +
             "result on quick scripts (<2s) — skips the poll round-trip.\n\n" +
+            "TIMEOUT: default " + getDefaultTimeoutSeconds() + "s watchdog, override per-call with " +
+            "{\"timeout_seconds\": N} (5-3600). If your script legitimately needs longer (e.g. a full " +
+            "binary sweep you can't easily chunk), ask for it explicitly — an unrequested slow script " +
+            "only gets " + getDefaultTimeoutSeconds() + "s. Exceeding the timeout marks the task TIMED_OUT " +
+            "(you're unblocked, the script keeps running quietly) UNLESS the worker pool is fully busy, " +
+            "in which case it is force-cancelled immediately to free capacity for other calls — the same " +
+            "rollback risk described below then applies. Prefer many small calls over one large one so a " +
+            "timeout costs you one batch, not the whole run.\n\n" +
             "WARNING — rollback on failure/disconnect: Ghidra's own PyGhidraScriptProvider wraps this ENTIRE " +
             "call in one outer transaction automatically, regardless of any transactions your own script " +
             "opens/commits internally. If the MCP client-server connection drops, the extension reloads, or " +
@@ -140,6 +154,12 @@ public class EvalPythonTool implements McpTool {
                 Map.entry("sync", Map.of(
                     "type", "boolean",
                     "description", "If true, execute synchronously and return the result inline — skips the task-id round-trip. Use for quick scripts (<2s). Default false (async via task manager) to avoid blocking on long-running operations like full RTTI scans."
+                )),
+                Map.entry("timeout_seconds", Map.of(
+                    "type", "integer",
+                    "description", "Watchdog timeout override, 5-3600 seconds. Default " + getDefaultTimeoutSeconds() +
+                        "s. Ask for more only when the script's scope genuinely needs it — the default is " +
+                        "deliberately tight so an unbounded/impossibly slow script doesn't pin a worker thread."
                 ))
             ),
             List.of("script"), null, null, null);

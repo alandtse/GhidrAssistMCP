@@ -98,6 +98,10 @@ public class GhidraScriptsTool implements McpTool {
     @Override public boolean isDestructive() { return true; }
     @Override public boolean isIdempotent() { return false; }
     @Override public boolean isOpenWorld() { return true; }
+    // Scripts run unconditionally async (see doRun) regardless of isLongRunning, and — like
+    // eval_python — can be arbitrary/slow. Give them the same generous default timeout, still
+    // overridable per-call via {"timeout_seconds": N}.
+    @Override public int getDefaultTimeoutSeconds() { return 90; }
 
     @Override
     public McpSchema.JsonSchema getInputSchema() {
@@ -302,9 +306,12 @@ public class GhidraScriptsTool implements McpTool {
     private McpSchema.CallToolResult doRun(Map<String, Object> arguments, Program currentProgram,
             GhidrAssistMCPBackend backend) {
         if (backend != null && backend.getTaskManager() != null) {
+            int timeoutSeconds = ghidrassistmcp.tasks.McpTaskManager.clampTimeoutSeconds(
+                arguments.get("timeout_seconds"), getDefaultTimeoutSeconds());
             McpTask task = backend.getTaskManager().submitTask(
-                getName(), arguments, () -> runScript(arguments, currentProgram, backend));
+                getName(), arguments, timeoutSeconds, () -> runScript(arguments, currentProgram, backend));
             return textResult("Script task submitted: " + task.getTaskId() +
+                " (timeout " + timeoutSeconds + "s, override with \"timeout_seconds\")" +
                 "\nUse get_task_status with this task_id to retrieve the result.");
         }
         return runScript(arguments, currentProgram, backend);
