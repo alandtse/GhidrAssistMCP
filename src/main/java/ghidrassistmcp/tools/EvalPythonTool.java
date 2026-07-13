@@ -123,7 +123,16 @@ public class EvalPythonTool implements McpTool {
             "dbg.set_control_mode('RW_TARGET') to arm bps, dbg.clear_all_breakpoints(), " +
             "dbg.snapshot(addr,len,then='detach') for VR fast-capture, dbg.detach() when done (captures " +
             "last_event/registers/stack before tearing the trace down, so calling it reflexively after an " +
-            "unexpected break doesn't lose that forensic data).\n" +
+            "unexpected break doesn't lose that forensic data). Catching a specific exception in a noisy " +
+            "multithreaded target: dbg.set_exception_filter(code, 'ignore'|'break'|...) to silence benign " +
+            "first-chance storms before arming the one you want (list_exception_filters() shows current sx " +
+            "state); on a break, dbg.get_event_thread()/dbg.event_registers() give the actual faulting " +
+            "thread/registers (get_registers() alone often returns a parked worker), and dbg.last_event() " +
+            "gives the triggering exception's code/thread/first-vs-second-chance so you can tell benign " +
+            "from fatal without resuming blindly. dbg.get_stack(thread=...) backtraces via the real dbgeng " +
+            "`k` walk. dbg.set_raw_breakpoint(rt_addr) / set_breakpoint(addr, raw=True) breakpoint a runtime " +
+            "address directly (bypasses static-mapping) for modules not loaded as a Ghidra program, e.g. " +
+            "system DLLs like d3d11.dll/ntdll.\n" +
             "  reng.*   — RE workflow: ASLR (image_base/to_rt/to_static — image_base is the canonical " +
             "live slide, prefer it over list_modules which lags after attach), RTTI " +
             "(rtti/class_hierarchy/vtable_methods), live instance location " +
