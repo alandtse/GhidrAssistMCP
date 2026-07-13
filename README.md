@@ -57,6 +57,9 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 ### Building from Source
 
+Source builds require Java 25 or newer. The included Gradle wrapper pins the
+supported Gradle release; use it instead of a system Gradle installation.
+
 1. **Clone the repository**:
 
    ```bash
@@ -72,7 +75,7 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
    Ensure Ghidra isn't running and run:
 
    ```bash
-   gradle installExtension
+   ./gradlew installExtension
    ```
 
    This copies the built ZIP into your Ghidra install (`[GHIDRA_INSTALL_DIR]/Extensions/Ghidra`) and extracts it into your Ghidra **user** Extensions folder (replacing any existing extracted copy).
@@ -114,7 +117,7 @@ First, build and install the extension so Ghidra can load the compiled classes a
 cd /path/to/GhidrAssistMCP
 
 export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1_PUBLIC
-gradle installExtension
+./gradlew installExtension
 ```
 
 Set paths for your Ghidra install and extracted user extension. On Linux, Ghidra user extensions usually live under `~/.config/ghidra/<ghidra_profile>/Extensions`:
@@ -158,7 +161,9 @@ MCP clients can connect to:
 Streamable HTTP: http://127.0.0.1:8080/mcp
 ```
 
-The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. The server holds a program consumer while it is running so MCP requests do not race against program database closure. Use `wait=true` when you want `analyzeHeadless` to stay open for interactive MCP clients; cancel the script or terminate the process to stop the server.
+The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. The server holds a program consumer while it is running so MCP requests do not race against program database closure. Use `wait=true` when you want `analyzeHeadless` to stay open for interactive MCP clients. A harness can also pass `completion_file=/workspace/control/session.complete`; creating that file closes the MCP server cleanly and lets Ghidra save and exit normally.
+
+Disposable static-analysis labs may pass `tool_profile=agent_lab`. This enables sandbox-local program export while arbitrary path import and Ghidra scripts remain disabled because they can expose process secrets or spawn processes. The harness owns artifact imports. Unknown profiles are rejected.
 
 ## Available Tools
 
@@ -972,22 +977,22 @@ src/main/java/ghidrassistmcp/
 
 ```bash
 # Clean build
-gradle clean
+./gradlew clean
 
 # Build extension zip (written to dist/)
-gradle buildExtension
+./gradlew buildExtension
 
 # Install (extract) extension into the Ghidra user Extensions directory
-gradle installExtension
+./gradlew installExtension
 
 # Uninstall (delete extracted directory from the Ghidra user Extensions directory)
-gradle uninstallExtension
+./gradlew uninstallExtension
 
 # Build/install with specific Ghidra path (required if GHIDRA_INSTALL_DIR isn't set)
-gradle -PGHIDRA_INSTALL_DIR=/path/to/ghidra installExtension
+./gradlew -PGHIDRA_INSTALL_DIR=/path/to/ghidra installExtension
 
 # Debug build
-gradle buildExtension --debug
+./gradlew buildExtension --debug
 ```
 
 ### Dependencies
@@ -1072,7 +1077,7 @@ Enable debug logging by adding to Ghidra startup:
 
 ### Code Standards
 
-- **Java 21+ features** where appropriate
+- **Java 25 baseline** for builds and runtime validation
 - **Proper exception handling** with meaningful messages
 - **Transaction safety** for all database operations
 - **Thread safety** for UI operations

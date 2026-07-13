@@ -18,7 +18,6 @@ import ghidra.app.decompiler.ClangFieldToken;
 import ghidra.app.decompiler.ClangNode;
 import ghidra.app.decompiler.ClangTokenGroup;
 import ghidra.app.decompiler.DecompInterface;
-import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.util.cparser.C.CParser;
 import ghidra.program.model.address.Address;
@@ -54,6 +53,8 @@ import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.decompiler.DecompilerService;
+import ghidrassistmcp.decompiler.DecompilerSession;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -61,6 +62,12 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Consolidates create_struct, modify_struct, auto_create_struct, rename_structure_field, and struct_field_xrefs.
  */
 public class StructTool implements McpTool {
+
+    private final DecompilerService decompilerService;
+
+    public StructTool(DecompilerService decompilerService) {
+        this.decompilerService = decompilerService;
+    }
 
     private static class ComponentSnapshot {
         final int offset;
@@ -1192,11 +1199,10 @@ public class StructTool implements McpTool {
 
             Msg.info(this, "Creating structure for variable '" + variableName + "' in function " + function.getName());
 
-            DecompInterface decompiler = new DecompInterface();
-            setupDecompiler(decompiler, program);
-
-            try {
-                DecompileResults results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+            try (DecompilerSession session = decompilerService.open(program)) {
+                DecompInterface decompiler = session.decompiler();
+                DecompileResults results = decompiler.decompileFunction(function,
+                    session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
                 if (!results.decompileCompleted()) {
                     errorMessage.append("Decompilation failed for function: ").append(function.getName());
@@ -1219,8 +1225,6 @@ public class StructTool implements McpTool {
                     committed = true;
                 }
 
-            } finally {
-                decompiler.dispose();
             }
 
         } catch (Exception e) {
@@ -1286,23 +1290,7 @@ public class StructTool implements McpTool {
             // Not an address, try as name
         }
 
-        var functionManager = program.getFunctionManager();
-        var functions = functionManager.getFunctions(true);
-
-        for (Function function : functions) {
-            if (function.getName().equals(identifier)) {
-                return function;
-            }
-        }
-
-        return null;
-    }
-
-    private void setupDecompiler(DecompInterface decompiler, Program program) {
-        DecompileOptions options = new DecompileOptions();
-        options.grabFromProgram(program);
-        decompiler.setOptions(options);
-        decompiler.openProgram(program);
+        return FunctionLookup.findByName(program, identifier);
     }
 
     private HighVariable findHighVariable(HighFunction highFunction, String varName) {
@@ -1766,13 +1754,8 @@ public class StructTool implements McpTool {
 
         List<FieldReference> references = new ArrayList<>();
 
-        DecompInterface decompiler = new DecompInterface();
-        try {
-            // Setup decompiler
-            DecompileOptions options = new DecompileOptions();
-            options.grabFromProgram(program);
-            decompiler.setOptions(options);
-            decompiler.openProgram(program);
+        try (DecompilerSession session = decompilerService.open(program)) {
+            DecompInterface decompiler = session.decompiler();
 
             // Iterate all functions
             FunctionIterator funcIter = program.getFunctionManager().getFunctions(true);
@@ -1787,7 +1770,7 @@ public class StructTool implements McpTool {
                 try {
                     // Decompile with timeout
                     DecompileResults results = decompiler.decompileFunction(
-                        function, 30, TaskMonitor.DUMMY);
+                        function, session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
                     if (!results.decompileCompleted()) {
                         continue;
@@ -1807,8 +1790,6 @@ public class StructTool implements McpTool {
                     continue;
                 }
             }
-        } finally {
-            decompiler.dispose();
         }
 
         return references;
