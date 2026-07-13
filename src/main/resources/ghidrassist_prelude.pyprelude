@@ -46,6 +46,30 @@ def module_name_matches(module_name, prog_name):
     return _mod_basename(module_name) == target
 
 class GhidraHelpers:
+    # Per-call cache of {id(session): (match_count, {src_addr_str: [(assoc, match), ...]})}.
+    # Built once per session per eval_python call instead of re-scanning every match set
+    # on every get_vt_matches/find_addr_in_version/accept_vt_match call — on a large binary
+    # a VT session can have 10^4-10^5 matches, and an unindexed linear scan per lookup is
+    # exactly what makes VT-heavy RE scripts (resolving many addresses across versions)
+    # time out.
+    _vt_index_cache = {}
+    def _vt_index(self, session):
+        '''Return (and cache) {src_addr_str: [(assoc, match), ...]} for a VT session,
+        rebuilding only if the session's total match count has changed since it was cached.'''
+        match_sets = list(session.getMatchSets())
+        live_count = sum(ms.getMatchCount() for ms in match_sets)
+        key = id(session)
+        cached = self._vt_index_cache.get(key)
+        if cached is not None and cached[0] == live_count:
+            return cached[1]
+        index = {}
+        for ms in match_sets:
+            for m in ms.getMatches():
+                assoc = m.getAssociation()
+                src = str(assoc.getSourceAddress())
+                index.setdefault(src, []).append((assoc, m))
+        self._vt_index_cache[key] = (live_count, index)
+        return index
     def get_program(self, name):
         '''Return the Program object for a program name if it is open in Ghidra.'''
         try:
@@ -184,47 +208,47 @@ class GhidraHelpers:
         except: return 'Error reading bytes'
     def get_vt_matches(self, session=None, status=None):
         '''Return list of {src, dst, status, similarity, confidence} dicts.
-        status: None=all, or one of ACCEPTED/REJECTED/AVAILABLE to filter.'''
+        status: None=all, or one of ACCEPTED/REJECTED/AVAILABLE to filter.
+        Uses a cached per-session index (see _vt_index) so repeated calls in the same
+        eval_python invocation don't each re-scan every match set from scratch.'''
         if session is None: session = self.get_vt_session()
         if not session: return []
         results = []
-        for ms in session.getMatchSets():
-            for m in ms.getMatches():
-                assoc = m.getAssociation()
+        for src, pairs in self._vt_index(session).items():
+            for assoc, m in pairs:
                 s = assoc.getStatus().name()
                 if status and s != status: continue
                 try: sim = m.getSimilarityScore().getScore()
                 except: sim = 0.0
                 try: conf = m.getConfidenceScore().getScore()
                 except: conf = 0.0
-                results.append({'src': str(assoc.getSourceAddress()), 'dst': str(assoc.getDestinationAddress()), 'status': s, 'similarity': sim, 'confidence': conf})
+                results.append({'src': src, 'dst': str(assoc.getDestinationAddress()), 'status': s, 'similarity': sim, 'confidence': conf})
         return results
     def find_addr_in_version(self, addr, session=None):
         '''Find the ACCEPTED destination address matching a source address in a VT session.
-        Returns the destination address string, or None if no accepted match found.'''
+        Returns the destination address string, or None if no accepted match found.
+        O(1) index lookup instead of a full match-set scan — safe to call in a tight loop
+        over many source addresses without timing out.'''
         if session is None: session = self.get_vt_session()
         if not session: return None
-        src = self.get_addr(addr)
-        for ms in session.getMatchSets():
-            for m in ms.getMatches():
-                assoc = m.getAssociation()
-                if assoc.getStatus().name() == 'ACCEPTED' and assoc.getSourceAddress() == src:
-                    return str(assoc.getDestinationAddress())
+        src = str(self.get_addr(addr))
+        for assoc, m in self._vt_index(session).get(src, []):
+            if assoc.getStatus().name() == 'ACCEPTED':
+                return str(assoc.getDestinationAddress())
         return None
     def accept_vt_match(self, src_addr, session=None):
         '''Accept the first AVAILABLE match for src_addr in the VT session.
         Returns the destination address string, or None if nothing to accept.'''
         if session is None: session = self.get_vt_session()
         if not session: return None
-        src = self.get_addr(src_addr)
-        for ms in session.getMatchSets():
-            for m in ms.getMatches():
-                assoc = m.getAssociation()
-                if assoc.getSourceAddress() == src and assoc.getStatus().name() == 'AVAILABLE':
-                    try:
-                        session.updateAssociationStatus(assoc, assoc.getStatus().ACCEPTED)
-                        return str(assoc.getDestinationAddress())
-                    except Exception as e: print('accept error: ' + str(e))
+        src = str(self.get_addr(src_addr))
+        for assoc, m in self._vt_index(session).get(src, []):
+            if assoc.getStatus().name() == 'AVAILABLE':
+                try:
+                    session.updateAssociationStatus(assoc, assoc.getStatus().ACCEPTED)
+                    self._vt_index_cache.pop(id(session), None)  # status changed — invalidate
+                    return str(assoc.getDestinationAddress())
+                except Exception as e: print('accept error: ' + str(e))
         return None
     def list_vt_sessions(self):
         '''Return a list of dicts describing open VT sessions: {name, src, dst, match_count}.'''
