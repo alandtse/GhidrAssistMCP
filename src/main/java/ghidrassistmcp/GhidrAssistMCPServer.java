@@ -5,8 +5,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiFunction;
 
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Enumeration;
+
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
 
@@ -60,6 +73,7 @@ public class GhidrAssistMCPServer {
             ServerConnector connector = new ServerConnector(jettyServer);
             connector.setHost(host);
             connector.setPort(port);
+            connector.setIdleTimeout(0); // Disable idle timeout so Jetty does not close idle MCP stream connections
             jettyServer.addConnector(connector);
 
             // Create servlet context
@@ -67,6 +81,63 @@ public class GhidrAssistMCPServer {
             ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
             context.setContextPath("/");
             jettyServer.setHandler(context);
+            
+            // Add CORS and Accept header normalization filter
+            FilterHolder corsFilterHolder = new FilterHolder(new Filter() {
+                @Override
+                public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+                        throws IOException, ServletException {
+                    HttpServletRequest httpRequest = (HttpServletRequest) req;
+                    HttpServletResponse httpResponse = (HttpServletResponse) res;
+
+                    // Add CORS and Expose-Headers so fetch/mcp-remote clients can read Mcp-Session-Id
+                    httpResponse.setHeader("Access-Control-Allow-Origin", "*");
+                    httpResponse.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                    httpResponse.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id, mcp-session-id, Authorization");
+                    httpResponse.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, mcp-session-id");
+
+                    if ("OPTIONS".equalsIgnoreCase(httpRequest.getMethod())) {
+                        httpResponse.setStatus(HttpServletResponse.SC_OK);
+                        return;
+                    }
+
+                    // Forward GET requests without session ID (targeting base /mcp) to SSE transport handler for native SSE clients
+                    String uri = httpRequest.getRequestURI();
+                    if ("GET".equalsIgnoreCase(httpRequest.getMethod()) &&
+                        httpRequest.getHeader("Mcp-Session-Id") == null &&
+                        httpRequest.getHeader("mcp-session-id") == null &&
+                        !uri.endsWith("/sse") && !uri.endsWith("/message")) {
+                        req.getRequestDispatcher("/mcp/sse").forward(req, res);
+                        return;
+                    }
+
+                    // Normalize Accept header if missing or incomplete for streamable transport
+                    String accept = httpRequest.getHeader("Accept");
+                    if (accept == null || !accept.contains("text/event-stream") || !accept.contains("application/json")) {
+                        httpRequest = new HttpServletRequestWrapper(httpRequest) {
+                            @Override
+                            public String getHeader(String name) {
+                                if ("Accept".equalsIgnoreCase(name)) {
+                                    String orig = super.getHeader("Accept");
+                                    return orig != null ? orig + ", text/event-stream, application/json" : "text/event-stream, application/json";
+                                }
+                                return super.getHeader(name);
+                            }
+
+                            @Override
+                            public Enumeration<String> getHeaders(String name) {
+                                if ("Accept".equalsIgnoreCase(name)) {
+                                    return Collections.enumeration(List.of("text/event-stream, application/json"));
+                                }
+                                return super.getHeaders(name);
+                            }
+                        };
+                    }
+
+                    chain.doFilter(httpRequest, httpResponse);
+                }
+            });
+            context.addFilter(corsFilterHolder, "/*", java.util.EnumSet.of(jakarta.servlet.DispatcherType.REQUEST));
             
             // Create MCP transport provider using custom ObjectMapper that ignores unknown properties
             Msg.info(this, "Creating MCP transport providers");
@@ -82,9 +153,20 @@ public class GhidrAssistMCPServer {
                     .keepAliveInterval(Duration.ofSeconds(15))
                     .build();
 
+            HttpServletSseServerTransportProvider sseTransportProvider =
+                HttpServletSseServerTransportProvider.builder()
+                    .jsonMapper(mapper)
+                    .sseEndpoint("/mcp/sse")
+                    .messageEndpoint("/mcp/message")
+                    .build();
+
             // Build MCP server using backend for configuration
             Msg.info(this, "Building MCP server with backend tools");
             var streamableServerBuilder = McpServer.sync(streamableTransportProvider)
+                .serverInfo(backend.getServerInfo())
+                .capabilities(backend.getCapabilities());
+
+            var sseServerBuilder = McpServer.sync(sseTransportProvider)
                 .serverInfo(backend.getServerInfo())
                 .capabilities(backend.getCapabilities());
 
@@ -99,6 +181,7 @@ public class GhidrAssistMCPServer {
                     };
 
                 streamableServerBuilder.toolCall(toolSchema, toolHandler);
+                sseServerBuilder.toolCall(toolSchema, toolHandler);
                 Msg.info(this, "Registered tool with MCP server: " + toolName);
             }
 
@@ -107,19 +190,29 @@ public class GhidrAssistMCPServer {
                 GhidrAssistMCPBackend ghidraBackend = (GhidrAssistMCPBackend) backend;
                 registerResources(streamableServerBuilder, ghidraBackend);
                 registerPrompts(streamableServerBuilder, ghidraBackend);
+                registerResources(sseServerBuilder, ghidraBackend);
+                registerPrompts(sseServerBuilder, ghidraBackend);
             }
 
             streamableServerBuilder.build();
+            sseServerBuilder.build();
             
-            // Register MCP servlet - use root path since transport provider handles routing internally
-            Msg.info(this, "Registering MCP servlet");
+            // Register MCP servlets (register SSE transport before Streamable to prevent wildcard route hijacking)
+            Msg.info(this, "Registering MCP servlets");
             
             try {
+                ServletHolder mcpSseServletHolder = new ServletHolder("mcp-sse-transport", sseTransportProvider);
+                mcpSseServletHolder.setAsyncSupported(true);
+                context.addServlet(mcpSseServletHolder, "/sse");
+                context.addServlet(mcpSseServletHolder, "/message");
+                context.addServlet(mcpSseServletHolder, "/mcp/sse");
+                context.addServlet(mcpSseServletHolder, "/mcp/message");
+
                 ServletHolder mcpStreamableServletHolder = new ServletHolder("mcp-streamable-transport", streamableTransportProvider);
                 mcpStreamableServletHolder.setAsyncSupported(true);
                 context.addServlet(mcpStreamableServletHolder, "/mcp");
-                context.addServlet(mcpStreamableServletHolder, "/mcp/*");
-                Msg.info(this, "Registered MCP Streamable servlet mapping: /mcp and /mcp/*");
+                context.addServlet(mcpStreamableServletHolder, "/mcp/");
+                Msg.info(this, "Registered MCP Streamable and SSE servlet mappings");
                 
                 // Log configuration
                 Msg.info(this, "Streamable HTTP transport provider class: " + streamableTransportProvider.getClass().getName());

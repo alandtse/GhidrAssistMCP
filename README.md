@@ -107,6 +107,65 @@ The Configuration tab allows you to:
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
 
+### Client Configuration (`mcp_config.json` / `mcp-remote`)
+
+When connecting CLI AI agents (such as `agy` or other MCP client hosts) to GhidrAssistMCP using `mcp-remote`, use the `--transport-strategy http-only` flag to avoid stream idle timeout retries and prevent STDERR log flooding.
+
+#### Recommended Setup (`http-only`)
+
+Add the following to your client's `mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ghidrAssistMCP": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp",
+        "--transport-strategy",
+        "http-only"
+      ]
+    }
+  }
+}
+```
+
+#### Alternative: STDERR Suppression
+
+If using streaming transport with `mcp-remote` on client hosts sensitive to background process STDERR noise, redirect `stderr` to `NUL` (Windows) or `/dev/null` (Linux/macOS):
+
+**Windows (`cmd.exe` wrapper):**
+```json
+{
+  "mcpServers": {
+    "ghidrAssistMCP": {
+      "command": "cmd.exe",
+      "args": [
+        "/c",
+        "npx -y mcp-remote http://localhost:8080/mcp 2>NUL"
+      ]
+    }
+  }
+}
+```
+
+**Linux / macOS (`sh` wrapper):**
+```json
+{
+  "mcpServers": {
+    "ghidrAssistMCP": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "npx -y mcp-remote http://localhost:8080/mcp 2>/dev/null"
+      ]
+    }
+  }
+}
+```
+
 ## Headless Mode Quickstart
 
 GhidrAssistMCP can also be started from Ghidra's `analyzeHeadless` launcher. This is useful when you want MCP access to a program loaded in headless Ghidra without opening the CodeBrowser UI.
