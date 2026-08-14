@@ -119,8 +119,20 @@ public class McpTaskManager {
     }
 
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
+                               McpProgramContext programContext,
+                               Supplier<McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, programContext, task -> taskExecutor.get());
+    }
+
+    public McpTask submitTask(String toolName, Map<String, Object> arguments,
                                Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
-        return submitTask(toolName, arguments, DEFAULT_TASK_TIMEOUT_SECONDS, taskExecutor);
+        return submitTask(toolName, arguments, McpProgramContext.empty(), taskExecutor);
+    }
+
+    public McpTask submitTask(String toolName, Map<String, Object> arguments,
+                               McpProgramContext programContext,
+                               Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, DEFAULT_TASK_TIMEOUT_SECONDS, programContext, taskExecutor);
     }
 
     public McpTask submitTask(String toolName, Map<String, Object> arguments, int timeoutSeconds,
@@ -135,10 +147,23 @@ public class McpTaskManager {
      */
     public McpTask submitTask(String toolName, Map<String, Object> arguments, int timeoutSeconds,
                                Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, timeoutSeconds, McpProgramContext.empty(), taskExecutor);
+    }
+
+    /**
+     * Submit a new async task for execution with an explicit watchdog timeout and an immutable
+     * snapshot of its target program (captured at submit time, so a later focus change doesn't
+     * retroactively change which program a completed task's result is decorated with).
+     *
+     * @param timeoutSeconds clamped to [{@link #MIN_TASK_TIMEOUT_SECONDS}, {@link #MAX_TASK_TIMEOUT_SECONDS}]
+     */
+    public McpTask submitTask(String toolName, Map<String, Object> arguments, int timeoutSeconds,
+                               McpProgramContext programContext,
+                               Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
         // Clean up old tasks before creating new ones
         cleanupOldTasks();
 
-        McpTask task = new McpTask(toolName, arguments);
+        McpTask task = new McpTask(toolName, arguments, programContext);
         task.setTimeoutSeconds(Math.max(MIN_TASK_TIMEOUT_SECONDS, Math.min(MAX_TASK_TIMEOUT_SECONDS, timeoutSeconds)));
         tasks.put(task.getTaskId(), task);
 

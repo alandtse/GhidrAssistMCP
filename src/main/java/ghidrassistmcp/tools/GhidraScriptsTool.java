@@ -308,8 +308,9 @@ public class GhidraScriptsTool implements McpTool {
         if (backend != null && backend.getTaskManager() != null) {
             int timeoutSeconds = ghidrassistmcp.tasks.McpTaskManager.clampTimeoutSeconds(
                 arguments.get("timeout_seconds"), getDefaultTimeoutSeconds());
-            McpTask task = backend.getTaskManager().submitTask(
-                getName(), arguments, timeoutSeconds, () -> runScript(arguments, currentProgram, backend));
+            McpTask task = backend.submitTask(
+                getName(), arguments, timeoutSeconds, currentProgram,
+                taskContext -> runScript(arguments, currentProgram, backend));
             return textResult("Script task submitted: " + task.getTaskId() +
                 " (timeout " + timeoutSeconds + "s, override with \"timeout_seconds\")" +
                 "\nUse get_task_status with this task_id to retrieve the result.");
