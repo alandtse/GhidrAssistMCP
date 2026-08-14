@@ -484,7 +484,8 @@ A `dbg` helper object is also pre-injected for dynamic analysis via the Ghidra D
 | `dbg.read_u64/read_u32(addr)` / `dbg.read_ptr(addr)` / `dbg.read_int(addr, size, signed)` | Typed little-endian scalar reads (int) for chasing pointer chains and fields |
 | `dbg.refresh_memory(addr, length)` | Force live memory read from target into trace; accepts either address space |
 | `dbg.write_memory(addr, hex_bytes)` | Write bytes to live target memory; accepts either address space |
-| `dbg.resume()` / `dbg.interrupt()` | Resume or suspend the target |
+| `dbg.resume()` / `dbg.interrupt()` | Resume or suspend a single thread (current, or `thread=` given) |
+| `dbg.resume_all()` | Resume the WHOLE process (dbgeng `g`) — use this after a `mode='default'` attach, which suspends every thread, not just one; `dbg.resume()` alone leaves the rest frozen |
 | `dbg.step_into()` / `dbg.step_over()` / `dbg.step_out()` | Single-step execution |
 | `dbg.kill()` | Kill the target process |
 | `dbg.list_breakpoints()` | All logical breakpoints: `[{address: '0x...', state, kinds, length, name}]` |
@@ -558,7 +559,7 @@ Typical dynamic-analysis workflow (all via `eval_python` + the `dbg` helper):
 1. `dbg.attach(<pid>)` — attach to a running process (`dbg.list_attach_offers()` lists backends); creates the session. Pass `mode='observe'` for read-only work (live struct/singleton exploration) — the target is never suspended, so it's safe against a real/HMD session; the default `mode='default'` is invasive and only needed for breakpoints/stepping/register writes.
 2. `dbg.status()` — confirm `connected: True`
 3. `dbg.get_registers()` / `dbg.read_memory(addr, n)` / `dbg.set_breakpoint(addr)` to inspect and instrument (breakpoints/writes require `mode='default'`)
-4. `dbg.resume()` / `dbg.interrupt()` to control execution; `dbg.detach()` when done — its return value includes captured `last_event`/registers/stack, taken before the trace is closed
+4. `dbg.resume_all()` (whole process) or `dbg.resume()` (single thread) / `dbg.interrupt()` to control execution; `dbg.detach()` when done — its return value includes captured `last_event`/registers/stack, taken before the trace is closed
 
 To locate an object instance to inspect, use `reng.find_instances(class_or_vtable)`. For read-only live struct/singleton work end to end: `dbg.attach(pid, mode='observe')` → `reng.explore(addr)`/`find_instances`/`snapshot_state`+`diff_snapshot` → `reng.label(addr, fields)` to commit corrections → `dbg.detach()`.
 

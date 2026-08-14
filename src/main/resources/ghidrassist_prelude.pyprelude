@@ -349,7 +349,10 @@ class DebuggerHelpers:
             if cm is None: return 'unknown mode: %s (try RW_TARGET)' % mode
             ctrl.setCurrentMode(trace, cm)
             return self.get_control_mode()
-        except Exception as e: return 'error: ' + str(e)
+        except Exception as e:
+            # str(e) is often empty for Java exceptions (no message set) — fall
+            # back to the exception class name so the error isn't just "error: ".
+            return 'error: %s: %s' % (type(e).__name__, e) if str(e) else 'error: %s' % type(e).__name__
     def get_threads(self):
         '''List all TraceThread objects in the active trace.'''
         trace = self.get_trace()
@@ -392,7 +395,8 @@ class DebuggerHelpers:
         pid: OS process id of the running target.
         mode: 'default' (invasive — required for breakpoints, stepping, register
           writes; SUSPENDS the target for the duration of attach, and initial-break
-          leaves it stopped until you dbg.resume()) or 'observe' (dbgeng
+          leaves it stopped until you dbg.resume_all() — dbg.resume() alone only
+          unfreezes one thread, not the whole suspended process) or 'observe' (dbgeng
           DEBUG_ATTACH_NONINVASIVE_NO_SUSPEND — the target is NEVER stopped; reads
           of memory/registers work, but breakpoints/stepping/writes do not, and
           detach() has nothing to interrupt). Use 'observe' for read-only live
@@ -756,6 +760,8 @@ class DebuggerHelpers:
         then optionally continue or detach. The capture-fast-then-detach workflow for
         frame-timed targets (VR) that get killed by the compositor when suspended.
         addr: static or live address. then: None | 'resume' | 'detach'.
+        'resume' resumes the WHOLE process (resume_all), matching a mode='default'
+        attach's whole-process suspend — not just the current thread.
         Returns {ok, address, length, hex, then}. The bytes stay readable offline
         from the trace afterward (read_memory/read_bytes with refresh=False).'''
         try:
@@ -764,7 +770,7 @@ class DebuggerHelpers:
                 return {'ok': False, 'error': r}
             hexs = self.read_memory(addr, length)
             after = None
-            if then == 'resume': after = self.resume()
+            if then == 'resume': after = self.resume_all()
             elif then == 'detach': after = self.detach()
             return {'ok': True, 'address': addr if isinstance(addr, str) else '0x%x' % addr,
                     'length': length, 'hex': hexs, 'then': after}
@@ -829,8 +835,22 @@ class DebuggerHelpers:
                 return 'ok'
         except Exception as e: return 'error: ' + str(e)
     def resume(self, thread=None):
-        '''Resume execution of the current (or given) thread.'''
+        '''Resume execution of the current (or given) thread ONLY.
+        On an invasive attach (mode='default') the WHOLE PROCESS is suspended
+        on attach, not just one thread — this call does not undo that; every
+        other thread stays frozen. Use dbg.resume_all() to resume the process.'''
         return self._do_action('RESUME', thread)
+    def resume_all(self):
+        '''Resume the ENTIRE process (all threads), not just one.
+        dbg.resume() goes through the action-based API (Target.collectActions
+        RESUME), which only targets the current/given thread — on a mode='default'
+        attach (which suspends the whole process, all threads) that leaves every
+        other thread frozen with no per-thread action to unstick them. This runs
+        the raw dbgeng "go" command instead, which resumes the process regardless
+        of per-thread suspend counts. Prefer this over resume() unless you
+        specifically want to leave other threads suspended.
+        Returns the command output (usually empty on success) or an error string.'''
+        return self.execute('g')
     def interrupt(self, thread=None):
         '''Suspend/interrupt the current (or given) thread.'''
         return self._do_action('INTERRUPT', thread)
