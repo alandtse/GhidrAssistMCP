@@ -527,40 +527,150 @@ class DebuggerHelpers:
             return conn.getMethods().get(name)
         except Exception: return None
 
-    def py_execute(self, python_code, to_string=True):
+    def backend_alive(self, timeout=2.0):
+        '''Check whether the live-debug backend is ACTUALLY responsive right
+        now, split into the two independent layers a hang can happen in:
+          rmi_ok:    the TraceRMI connection + Python "execute" channel is
+                     alive (a nonce round trip via py_execute that never
+                     enters the dbgeng command loop itself).
+          dbgeng_ok: the dbgeng command loop is alive and answering real
+                     commands (None if rmi_ok is False — layer 2 can't be
+                     probed without layer 1).
+          stopped:   True if the target is CONFIRMED stopped (a dbgeng
+                     command completed normally), False if CONFIRMED running
+                     (dbgeng raised DebuggeeRunningException), None if this
+                     can't be determined (either layer not ok, or timeout).
+        Use this — not a fixed sleep — before detach() or any other
+        stop-then-act sequence: an INTERRUPT action can be issued without the
+        target (or a wedged dbgeng loop) actually having stopped yet.
+        Returns {rmi_ok, dbgeng_ok, stopped, rtt_ms}.'''
+        import time as _t
+        t0 = _t.time()
+        echo = self.py_execute('pass', to_string=True, timeout=timeout)
+        rmi_ok = isinstance(echo, str) and not echo.startswith('error')
+        if not rmi_ok:
+            return {'rmi_ok': False, 'dbgeng_ok': None, 'stopped': None,
+                    'rtt_ms': (_t.time() - t0) * 1000.0}
+        py = ('from ghidradbg import util as _u\n'
+              'try:\n'
+              '    _sys.stdout.write("OK:" + _u.dbg.cmd("r rip"))\n'
+              'except Exception as _e:\n'
+              '    _sys.stdout.write("EXC:" + type(_e).__name__ + ":" + str(_e))\n')
+        out = self.py_execute(py, to_string=True, timeout=timeout)
+        rtt_ms = (_t.time() - t0) * 1000.0
+        if not isinstance(out, str) or out.startswith('error'):
+            return {'rmi_ok': True, 'dbgeng_ok': False, 'stopped': None, 'rtt_ms': rtt_ms}
+        if out.startswith('OK:'):
+            return {'rmi_ok': True, 'dbgeng_ok': True, 'stopped': True, 'rtt_ms': rtt_ms}
+        if 'Running' in out:
+            return {'rmi_ok': True, 'dbgeng_ok': True, 'stopped': False, 'rtt_ms': rtt_ms}
+        return {'rmi_ok': True, 'dbgeng_ok': False, 'stopped': None, 'rtt_ms': rtt_ms, 'raw': out}
+
+    def _bounded_invoke(self, method, args, timeout):
+        '''Invoke a RemoteMethod with a hard wall-clock timeout, so a wedged
+        backend command loop can't hang the caller forever. Returns the raw
+        result, or None on timeout (the underlying call may still be running
+        server-side — this only bounds how long WE wait for it).'''
+        try:
+            future = method.invokeAsync(args)
+        except Exception:
+            future = None
+        import java.util.concurrent.TimeUnit as _TimeUnit
+        if future is not None:
+            try:
+                return future.get(int(timeout * 1000), _TimeUnit.MILLISECONDS)
+            except Exception:
+                try: future.cancel(True)
+                except Exception: pass
+                return None
+        # No invokeAsync on this RemoteMethod — fall back to a throwaway
+        # single-thread executor so the blocking invoke() still gets a timeout.
+        import java.util.concurrent.Executors as _Executors
+        import jpype
+        @jpype.JImplements('java.util.concurrent.Callable')
+        class _Call:
+            @jpype.JOverride
+            def call(self): return method.invoke(args)
+        pool = _Executors.newSingleThreadExecutor()
+        try:
+            fut = pool.submit(_Call())
+            try:
+                return fut.get(int(timeout * 1000), _TimeUnit.MILLISECONDS)
+            except Exception:
+                try: fut.cancel(True)
+                except Exception: pass
+                return None
+        finally:
+            pool.shutdown()
+
+    def py_execute(self, python_code, to_string=True, timeout=15.0):
         '''Run raw Python in the live debugger backend (ghidradbg) process.
         This is the keystone passthrough: it invokes the backend's "execute"
         RemoteMethod over TraceRMI. The backend has `util` (ghidradbg.util)
         and `util.dbg` (the dbgeng wrapper) in scope.
         to_string=True captures the backend's stdout and returns it as a string.
-        Returns the captured output (str) or an error string.
+        timeout: seconds to wait for the backend before giving up.
+
+        Every call is tagged with a per-call nonce the backend must echo back
+        around its real output. This is a PROOF of freshness, not a heuristic:
+        a wedged dbgeng command loop can return a stale/interleaved response
+        that still looks like valid output, and byte-comparing snap counters
+        or prior results can't reliably tell that apart from a genuinely
+        repeated event (e.g. the same breakpoint hit twice). Missing or
+        mismatched nonce marker -> the response can't be trusted as this
+        call's real answer.
+        Returns the captured output (str) on success, or an "error: ..."
+        string (never partial/stale data) on timeout or nonce mismatch.
         Most callers want dbg.execute() for dbgeng commands instead.'''
         try:
             import java.util.HashMap as _JMap
+            import uuid as _uuid
             m = self._remote_method('execute')
             if m is None:
                 return 'error: no "execute" remote method (backend not dbgeng or not connected)'
+            nonce = _uuid.uuid4().hex[:12]
+            start_tag, end_tag = '<<GA:%s>>' % nonce, '<<ga:%s>>' % nonce
+            wrapped = ('import sys as _sys\n'
+                       '_sys.stdout.write(%r)\n'
+                       '%s\n'
+                       '_sys.stdout.write(%r)\n') % (start_tag, python_code, end_tag)
             args = _JMap()
-            args.put('cmd', python_code)
+            args.put('cmd', wrapped)
             args.put('to_string', bool(to_string))
-            result = m.invoke(args)
-            return result if result is not None else ''
+            result = self._bounded_invoke(m, args, timeout)
+            if result is None:
+                return ('error: backend_timeout: no response within %ss — the dbgeng command '
+                         'loop may be wedged; try dbg.backend_alive() to see which layer is '
+                         'stuck before retrying' % timeout)
+            result = str(result)
+            si, ei = result.find(start_tag), result.find(end_tag)
+            if si == -1 or ei == -1:
+                return ('error: backend_stale: response did not carry this call\'s nonce — '
+                         'the backend may be wedged or replaying a prior call\'s output; '
+                         'try dbg.backend_alive()')
+            return result[si + len(start_tag):ei]
         except Exception as e: return 'error: ' + str(e)
 
-    def execute(self, dbgeng_cmd):
+    def execute(self, dbgeng_cmd, timeout=15.0):
         '''Run a raw dbgeng (WinDbg engine) command and return its output.
         Examples: dbg.execute("k"), dbg.execute("~"), dbg.execute("sxd av"),
         dbg.execute(".lastevent"), dbg.execute("!analyze -v"),
         dbg.execute("bp 0x7ff8...").
         Routes through py_execute -> ghidradbg util.dbg.cmd(), which captures
-        the command's output. Returns the output string, or an error string.'''
+        the command's output. Retries once on a backend_timeout/backend_stale
+        result (a single transient hiccup is plausible) before giving up.
+        Returns the output string, or an "error: ..." string — never stale
+        data — if the backend never proves it answered this specific call.'''
         # Marshal the command into a backend Python call. util.dbg.cmd captures
         # and returns the command output; we write it to stdout so the execute
         # RemoteMethod's to_string capture returns it to us.
         py = ('from ghidradbg import util as _u\n'
-              'import sys as _sys\n'
               '_sys.stdout.write(_u.dbg.cmd(%r))\n' % str(dbgeng_cmd))
-        return self.py_execute(py, to_string=True)
+        result = self.py_execute(py, to_string=True, timeout=timeout)
+        if isinstance(result, str) and (result.startswith('error: backend_timeout')
+                                         or result.startswith('error: backend_stale')):
+            result = self.py_execute(py, to_string=True, timeout=timeout)
+        return result
 
     def list_modules(self, name_filter=None):
         '''Loaded modules with runtime base addresses — essential for ASLR conversion.
@@ -867,7 +977,7 @@ class DebuggerHelpers:
         '''Kill the target process.'''
         return self._do_action('KILL', thread)
 
-    def detach(self):
+    def detach(self, force=False):
         '''Cleanly disconnect from the live target, leaving it running.
         Captures forensic state FIRST — before touching anything — so calling this
         reflexively right after an unexpected break doesn't destroy the one record
@@ -878,14 +988,22 @@ class DebuggerHelpers:
         is allowed. If you just close the TraceRMI connection on a running target,
         dbgeng kills the debuggee instead of detaching. This helper does the right thing:
           0. Capture last_event / event_registers / get_stack (best-effort)
-          1. INTERRUPT (if target is running)
+          1. INTERRUPT, then CONFIRM the target actually stopped via backend_alive()
+             (bounded poll, one re-interrupt) — NOT a fixed sleep. A dbgeng command
+             loop can be wedged and never report the stop, in which case DETACH
+             would kill the debuggee instead of releasing it.
           2. DETACH action (target keeps running, debugger releases it)
           3. closeTrace + close TraceRMI connection (frees Ghidra resources)
-        For a mode='observe' session there was nothing invasive to interrupt, so step 1
-        can take noticeably longer (observed ~15-20s vs near-instant for mode='default')
-        while the engine resolves that on its own; this is not a hang, just call this
-        via eval_python's default async execution (not sync=True) and poll.
-        Returns {steps, forensics: {last_event, event_registers, stack}}.'''
+        force=False (default): if step 1 never confirms the target stopped within
+          the poll budget (~20s, covering mode='observe' sessions which can take
+          15-20s to resolve an interrupt on their own), REFUSE to DETACH — leaves
+          the trace/connection open (nothing lost; forensics are already captured)
+          and returns {'ok': False, 'error': 'interrupt_unconfirmed', 'probe': ...}.
+          Retry dbg.detach(), or pass force=True to proceed anyway, ACCEPTING that
+          dbgeng may kill a still-running target instead of detaching from it.
+        Call this via eval_python's default async execution (not sync=True) and
+        poll — it can legitimately take several seconds.
+        Returns {ok, steps, forensics: {last_event, event_registers, stack}, probe}.'''
         from ghidra.debug.api.target import ActionName, Target
         from ghidra.app.services import DebuggerTraceManagerService, TraceRmiService
         from docking import DefaultActionContext
@@ -905,13 +1023,35 @@ class DebuggerHelpers:
         except Exception as e: forensics['stack'] = {'error': str(e)}
         ctx = DefaultActionContext()
         policy = Target.ObjectArgumentPolicy.CURRENT_AND_RELATED
-        # 1. Interrupt if running (so DETACH is allowed)
-        try:
+        # 1. Interrupt, then CONFIRM via backend_alive() — up to 2 rounds of
+        # (interrupt, poll up to 8s) — before trusting DETACH is safe.
+        def _interrupt():
             for entry in target.collectActions(ActionName.INTERRUPT, ctx, policy).values():
                 entry.invokeAsync(False); break
-            time.sleep(0.5)
+        probe = {'stopped': None}
+        try:
+            _interrupt()
             steps.append('interrupted')
         except Exception as e: steps.append('interrupt-err: %s' % e)
+        for attempt in range(2):
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                probe = self.backend_alive(timeout=2.0)
+                if probe.get('stopped') is True: break
+                time.sleep(0.5)
+            if probe.get('stopped') is True: break
+            if attempt == 0:
+                steps.append('not confirmed stopped — re-interrupting')
+                try: _interrupt()
+                except Exception as e: steps.append('re-interrupt-err: %s' % e)
+        if probe.get('stopped') is not True and not force:
+            return {'ok': False, 'error': 'interrupt_unconfirmed', 'probe': probe,
+                    'steps': ' → '.join(steps), 'forensics': forensics,
+                    'hint': 'target still running or dbgeng loop wedged; DETACH would likely '
+                            'kill the debuggee instead of releasing it. Retry dbg.detach(), or '
+                            'dbg.detach(force=True) accepting the risk of killing the process.'}
+        if probe.get('stopped') is not True:
+            steps.append('forced: proceeding without confirmed stop (may kill target)')
         # 2. DETACH action
         try:
             actions = target.collectActions(ActionName.DETACH, ctx, policy)
@@ -934,7 +1074,7 @@ class DebuggerHelpers:
             steps.append('connection closed')
         except Exception as e: steps.append('close-conn-err: %s' % e)
         DebuggerHelpers._conn = None
-        return {'steps': ' → '.join(steps), 'forensics': forensics}
+        return {'ok': True, 'steps': ' → '.join(steps), 'forensics': forensics, 'probe': probe}
     def list_breakpoints(self):
         '''List all logical breakpoints as list of {address, state, kinds, length} dicts.
         Address is formatted as 0x... hex matching set_breakpoint/delete_breakpoints output.'''
@@ -1202,7 +1342,10 @@ class DebuggerHelpers:
         (pc a 0x... hex string). The trace often records only the top frame, so
         with walk=True (default) and a live dbgeng session this returns the full
         parsed backend walk: {level, stack_ptr, ret_addr, location, module, symbol}.
-        [] if no frames, [{error:...}] on failure.'''
+        [] if no frames, [{error:...}] on failure. If the backend walk itself
+        fails with a proven staleness/timeout error (not just "no connection"),
+        that error is surfaced rather than silently falling back to the
+        (possibly equally stale) trace-recorded frame(s).'''
         try:
             if thread is None: thread = self.get_thread()
             if snap is None: snap = self.get_snap()
@@ -1228,6 +1371,10 @@ class DebuggerHelpers:
                 if isinstance(bt, str) and not bt.startswith('error'):
                     parsed = self._parse_k(bt)
                     if parsed: return parsed
+                elif isinstance(bt, str) and ('backend_stale' in bt or 'backend_timeout' in bt):
+                    # A proven-stale/timed-out walk is worse than useless silently
+                    # swapped for the (possibly also stale) trace-recorded frame(s).
+                    return [{'error': bt, 'partial_trace': result}]
             return result
         except Exception as e: return [{'error': str(e)}]
     def set_exception_filter(self, code, disposition='break'):
