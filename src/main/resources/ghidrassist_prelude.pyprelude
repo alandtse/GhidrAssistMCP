@@ -314,6 +314,12 @@ class DebuggerHelpers:
     def get_bp_service(self):
         '''DebuggerLogicalBreakpointService — logical breakpoint CRUD.'''
         return self._svc('ghidra.app.services.DebuggerLogicalBreakpointService')
+    BP_SERVICE_NOT_LOADED = (
+        'DebuggerLogicalBreakpointService not loaded — the Debugger tool plugins are not '
+        'enabled in this Ghidra tool. Fix: File -> Configure -> Debugger category -> enable '
+        '"Debugger Logical Breakpoints Service" (and its dependencies), or open the Debugger '
+        'perspective once (Window -> Debugger) so Ghidra auto-loads it. Until then, use '
+        'set_raw_breakpoint()/set_breakpoint(raw=True) instead, which bypasses this service.')
     def get_trace(self):
         '''Active Trace object, or None if no debugger session.'''
         tm = self.get_trace_manager()
@@ -1080,7 +1086,7 @@ class DebuggerHelpers:
         Address is formatted as 0x... hex matching set_breakpoint/delete_breakpoints output.'''
         try:
             svc = self.get_bp_service()
-            if not svc: return [{'error': 'DebuggerLogicalBreakpointService not loaded'}]
+            if not svc: return [{'error': self.BP_SERVICE_NOT_LOADED}]
             result = []
             for bp in svc.getAllBreakpoints():
                 try:
@@ -1206,7 +1212,7 @@ class DebuggerHelpers:
             from ghidra.trace.model.breakpoint import TraceBreakpointKind
             svc = self.get_bp_service()
             if not svc:
-                return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
+                return {'ok': False, 'message': self.BP_SERVICE_NOT_LOADED}
             import java.util.Set as _JSet
             if self.get_trace() is not None:
                 self.ensure_static_mapping()
@@ -1244,7 +1250,7 @@ class DebuggerHelpers:
         Returns {ok, address: '0x...', deleted: N, message}.'''
         try:
             svc = self.get_bp_service()
-            if not svc: return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
+            if not svc: return {'ok': False, 'message': self.BP_SERVICE_NOT_LOADED}
             addr_int, hex_str, prog_addr = self._normalize_addr(addr)
             bps = list(svc.getBreakpointsAt(currentProgram, prog_addr))
             if not bps:
@@ -1278,7 +1284,7 @@ class DebuggerHelpers:
         Returns {ok, deleted, remaining}.'''
         try:
             svc = self.get_bp_service()
-            if not svc: return {'ok': False, 'message': 'DebuggerLogicalBreakpointService not loaded'}
+            if not svc: return {'ok': False, 'message': self.BP_SERVICE_NOT_LOADED}
             bps = list(svc.getAllBreakpoints())
             deleted = 0
             for bp in bps:
