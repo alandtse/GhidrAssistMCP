@@ -487,7 +487,7 @@ class DebuggerHelpers:
                 existing_bps = [{'error': 'could not query breakpoints'}]
             return {'ok': True, 'offer': offer.getTitle(),
                     'trace': tr.getName() if tr else None,
-                    'execute_ready': self.get_connection() is not None,
+                    'execute_ready': self._remote_method('execute') is not None,
                     'image_base': ('0x%x' % ib) if ib else None,
                     'modules_ready': ib is not None,
                     'mode': mode,
