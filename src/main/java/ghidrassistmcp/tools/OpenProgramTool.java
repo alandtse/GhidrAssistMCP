@@ -200,8 +200,18 @@ public class OpenProgramTool implements McpTool {
 
         Program program = null;
         try {
-            program = (Program) match.getDomainObject(
+            ghidra.framework.model.DomainObject domainObject = match.getDomainObject(
                 this, false, false, TaskMonitor.DUMMY);
+            if (!(domainObject instanceof Program)) {
+                String contentType = match.getContentType();
+                domainObject.release(this);
+                return textResult("'" + name + "' is not a Program (content type: " + contentType +
+                    "). open_program only opens Program files, so it can't open this — e.g. a " +
+                    "Version Tracking session (VTSessionDB) isn't a Program and has no headless " +
+                    "open path via MCP yet; it must be opened from Ghidra's Version Tracking GUI " +
+                    "tool before find_addr_in_version/get_vt_matches-style tools can see it.");
+            }
+            program = (Program) domainObject;
 
             if (getBoolean(arguments, "suppress_analysis_prompt", true)) {
                 AnalysisUtils.setAskToAnalyze(program, false);
