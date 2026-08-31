@@ -38,19 +38,55 @@ import io.modelcontextprotocol.spec.McpSchema;
  */
 public class EvalPythonTool implements McpTool {
 
-    private static volatile String PRELUDE_CACHE = null;
+    /**
+     * System property naming a loose prelude file to read fresh on every call, bypassing the
+     * bundled JAR resource entirely. The JAR is locked while Ghidra runs (extension reinstall
+     * requires closing it), so it is immutable for the JVM's lifetime and caching it forever is
+     * correct; a loose file can be edited in place, so it is deliberately never cached — reading
+     * ~150KB from a warm page cache is noise next to the temp-file write + PyGhidra parse this
+     * method's caller already does on every eval_python call.
+     * Set e.g. -Dghidrassist.prelude.path=E:\...\src\main\resources\ghidrassist_prelude.pyprelude
+     * to iterate on the prelude with no rebuild/reinstall/Ghidra-restart.
+     */
+    public static final String OVERRIDE_PROP = "ghidrassist.prelude.path";
 
-    /** Load prelude from the bundled .py resource file (cached after first load). */
+    private static volatile String jarPreludeCache = null;
+    private static volatile String lastGoodOverride = null;
+
+    private static java.nio.file.Path resolveOverridePath() {
+        String prop = System.getProperty(OVERRIDE_PROP);
+        if (prop == null || prop.trim().isEmpty()) return null;
+        java.nio.file.Path p = java.nio.file.Path.of(prop.trim());
+        return java.nio.file.Files.isRegularFile(p) ? p : null;
+    }
+
+    /** Load the prelude: a loose-file override (read fresh) if configured, else the bundled
+     * .py resource file (cached after first load — the JAR can't change without a restart). */
     private static String loadPrelude() {
-        if (PRELUDE_CACHE != null) return PRELUDE_CACHE;
+        java.nio.file.Path override = resolveOverridePath();
+        if (override != null) {
+            try {
+                String content = java.nio.file.Files.readString(override, StandardCharsets.UTF_8);
+                lastGoodOverride = content;
+                return "# prelude-source: " + override.toAbsolutePath() + " (" + content.length() + " chars)\n" + content;
+            } catch (IOException e) {
+                Msg.warn(EvalPythonTool.class,
+                    "Failed to read prelude override: " + override + ", falling back to last good copy", e);
+                if (lastGoodOverride != null) {
+                    return "# prelude-source: " + override.toAbsolutePath() + " (fallback-cached)\n" + lastGoodOverride;
+                }
+                // fall through to the bundled resource — no good override to fall back on yet
+            }
+        }
+        if (jarPreludeCache != null) return jarPreludeCache;
         // .pyprelude extension prevents Ghidra's script scanner / PyGhidra from executing it at startup
         try (InputStream is = EvalPythonTool.class.getResourceAsStream("/ghidrassist_prelude.pyprelude")) {
             if (is == null) {
                 Msg.error(EvalPythonTool.class, "ghidrassist_prelude.pyprelude not found in JAR resources");
                 return "# prelude load failed\n";
             }
-            PRELUDE_CACHE = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            return PRELUDE_CACHE;
+            jarPreludeCache = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            return jarPreludeCache;
         } catch (IOException e) {
             Msg.error(EvalPythonTool.class, "Failed to load ghidrassist_prelude.py", e);
             return "# prelude load failed: " + e.getMessage() + "\n";
