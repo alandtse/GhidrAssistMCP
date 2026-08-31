@@ -140,6 +140,7 @@ public class GhidrAssistMCPManager {
         if (registeredTools.isEmpty()) {
             Msg.info(this, "All tools unregistered, stopping server");
             stopServer();
+            VtSessionRegistry.getInstance().releaseAll();
 
             // Clean up singleton for potential restart
             synchronized (lock) {

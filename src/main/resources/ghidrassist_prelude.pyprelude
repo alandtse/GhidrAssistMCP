@@ -91,7 +91,11 @@ class GhidraHelpers:
                             seen.add(id(t)); yield t
         except: pass
     def get_vt_sessions(self):
-        '''Return all open VTSessions found across all running Ghidra tools.'''
+        '''Return all open VTSessions: GUI-opened (found across all running Ghidra tools) plus
+        any opened headlessly via open_program's 'open_vt' action (no human needed to have
+        opened the Version Tracking GUI tool on them). Ghidra caches one DomainObject instance
+        per DomainFile, so a session open both ways is still the same object — identity dedup
+        (id()) is sufficient, no path-based matching needed.'''
         sessions = []
         seen = set()
         for tool in self._iter_all_tools():
@@ -121,6 +125,14 @@ class GhidraHelpers:
                                 seen.add(id(sess)); sessions.append(sess)
                         except: pass
             except: pass
+        # Headlessly-opened sessions (open_program action 'open_vt') last, so GUI sessions
+        # keep index priority — get_vt_session(0) stays stable for existing callers.
+        try:
+            from ghidrassistmcp import VtSessionRegistry
+            for sess in VtSessionRegistry.getInstance().getSessions():
+                if id(sess) not in seen:
+                    seen.add(id(sess)); sessions.append(sess)
+        except Exception: pass
         return sessions
     def get_vt_session(self, idx=0):
         '''Return the open VTSession at the specified index, or None if not found.'''

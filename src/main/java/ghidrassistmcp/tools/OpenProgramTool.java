@@ -36,8 +36,11 @@ public class OpenProgramTool implements McpTool {
     @Override
     public String getDescription() {
         return "Open a program from the Ghidra project in CodeBrowser, or list all " +
-               "programs available in the project. " +
-               "Use action 'list' to see all project files, or 'open' to open one by name or full path. " +
+               "project files (programs and Version Tracking sessions). " +
+               "Use action 'list' to see all project files, 'open' to open a program by name or " +
+               "full path, 'open_vt' to open a Version Tracking session headlessly (no GUI needed) " +
+               "so eval_python's VT helpers (get_vt_sessions/find_addr_in_version/etc.) can see it, " +
+               "or 'close_vt' to release one opened this way. " +
                "Example: {\"action\": \"open\", \"name\": \"/banks/bank00.bin\"}";
     }
 
@@ -58,11 +61,12 @@ public class OpenProgramTool implements McpTool {
                 Map.entry("action", Map.of(
                     "type", "string",
                     "description", "Operation to perform",
-                    "enum", List.of("list", "open")
+                    "enum", List.of("list", "open", "open_vt", "close_vt")
                 )),
                 Map.entry("name", Map.of(
                     "type", "string",
-                    "description", "Program name or full project path to open (required for action 'open'). Supports partial name matching."
+                    "description", "Program or Version Tracking session name/full project path " +
+                        "(required for actions 'open'/'open_vt'/'close_vt'). Supports partial name matching for 'open'/'open_vt'."
                 )),
                 Map.entry("folder", Map.of(
                     "type", "string",
@@ -113,7 +117,7 @@ public class OpenProgramTool implements McpTool {
 
         String action = (String) arguments.get("action");
         if (action == null || action.isEmpty()) {
-            return textResult("action parameter is required: 'list' or 'open'");
+            return textResult("action parameter is required: 'list', 'open', 'open_vt', or 'close_vt'");
         }
 
         DomainFolder rootFolder = project.getProjectData().getRootFolder();
@@ -123,8 +127,12 @@ public class OpenProgramTool implements McpTool {
                 return listPrograms(rootFolder, (String) arguments.get("folder"));
             case "open":
                 return openProgram(rootFolder, arguments, pluginTool, backend);
+            case "open_vt":
+                return openVtSession(rootFolder, arguments);
+            case "close_vt":
+                return closeVtSession(arguments);
             default:
-                return textResult("Invalid action: " + action + ". Use 'list' or 'open'.");
+                return textResult("Invalid action: " + action + ". Use 'list', 'open', 'open_vt', or 'close_vt'.");
         }
     }
 
@@ -206,10 +214,8 @@ public class OpenProgramTool implements McpTool {
                 String contentType = match.getContentType();
                 domainObject.release(this);
                 return textResult("'" + name + "' is not a Program (content type: " + contentType +
-                    "). open_program only opens Program files, so it can't open this — e.g. a " +
-                    "Version Tracking session (VTSessionDB) isn't a Program and has no headless " +
-                    "open path via MCP yet; it must be opened from Ghidra's Version Tracking GUI " +
-                    "tool before find_addr_in_version/get_vt_matches-style tools can see it.");
+                    "). The 'open' action only opens Program files — for a Version Tracking " +
+                    "session, use {\"action\": \"open_vt\", \"name\": \"" + name + "\"} instead.");
             }
             program = (Program) domainObject;
 
@@ -235,6 +241,50 @@ public class OpenProgramTool implements McpTool {
                 program.release(this);
             }
         }
+    }
+
+    /** Open a Version Tracking session headlessly, keeping it alive via
+     * {@link ghidrassistmcp.VtSessionRegistry} so eval_python's VT helpers can reach it
+     * without a human first opening it in Ghidra's Version Tracking GUI tool. */
+    private McpSchema.CallToolResult openVtSession(DomainFolder rootFolder, Map<String, Object> arguments) {
+        String name = (String) arguments.get("name");
+        if (name == null || name.isBlank()) {
+            return textResult("'name' is required for action 'open_vt'.");
+        }
+
+        List<DomainFile> allFiles = new ArrayList<>();
+        collectFiles(rootFolder, allFiles);
+        DomainFile match = findFile(allFiles, name);
+        if (match == null) {
+            return textResult("File not found: '" + name + "'. Use action 'list' to see available project files.");
+        }
+
+        try {
+            ghidrassistmcp.VtSessionRegistry.getInstance().open(match);
+            return textResult("Opened Version Tracking session '" + match.getName() + "' (" +
+                match.getPathname() + "). It is now visible to eval_python's dbg./reng./" +
+                "get_vt_sessions() VT helpers. Use {\"action\": \"close_vt\", \"name\": \"" +
+                match.getPathname() + "\"} to release it when done.");
+        } catch (IllegalArgumentException e) {
+            return textResult(e.getMessage());
+        } catch (Exception e) {
+            Msg.error(this, "Failed to open VT session: " + match.getName(), e);
+            return textResult("Failed to open '" + match.getName() + "': " + e.getMessage());
+        }
+    }
+
+    /** Release a VT session previously opened via 'open_vt'. No-op (reports as such) if it
+     * was never opened through this registry — e.g. it's only open in the GUI. */
+    private McpSchema.CallToolResult closeVtSession(Map<String, Object> arguments) {
+        String name = (String) arguments.get("name");
+        if (name == null || name.isBlank()) {
+            return textResult("'name' is required for action 'close_vt'.");
+        }
+        boolean closed = ghidrassistmcp.VtSessionRegistry.getInstance().close(name);
+        return textResult(closed
+            ? "Closed Version Tracking session '" + name + "'."
+            : "'" + name + "' was not open via 'open_vt' (nothing to close here — " +
+              "it may only be open in the Version Tracking GUI tool, if at all).");
     }
 
     private String maybeSubmitAnalysis(Program program, Map<String, Object> arguments,
